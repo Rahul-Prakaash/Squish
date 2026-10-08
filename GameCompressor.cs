@@ -67,17 +67,45 @@ namespace GameCompressor
 
     static class Theme
     {
-        public static readonly Color Bg = Color.FromArgb(17, 19, 24);
-        public static readonly Color Card = Color.FromArgb(27, 30, 37);
-        public static readonly Color Raised = Color.FromArgb(39, 43, 53);
-        public static readonly Color Border = Color.FromArgb(55, 60, 73);
-        public static readonly Color Text = Color.FromArgb(233, 236, 241);
-        public static readonly Color Muted = Color.FromArgb(146, 154, 170);
-        public static readonly Color Accent = Color.FromArgb(92, 139, 255);
-        public static readonly Color Good = Color.FromArgb(78, 203, 131);
-        public static readonly Color Warn = Color.FromArgb(229, 170, 66);
-        public static readonly Color Bad = Color.FromArgb(244, 104, 104);
+        public static bool Dark;
+        public static Color Bg, Card, Raised, Border, Text, Muted, Accent, Good, Warn, Bad;
         public static readonly Color Hot = Color.FromArgb(255, 146, 72), HotDeep = Color.FromArgb(236, 72, 84);
+
+        static Theme() { SetDark(true); }
+
+        public static void SetDark(bool dark)
+        {
+            Dark = dark;
+            if (dark)
+            {
+                Bg = Color.FromArgb(17, 19, 24); Card = Color.FromArgb(27, 30, 37); Raised = Color.FromArgb(39, 43, 53);
+                Border = Color.FromArgb(55, 60, 73); Text = Color.FromArgb(233, 236, 241); Muted = Color.FromArgb(146, 154, 170);
+                Accent = Color.FromArgb(92, 139, 255); Good = Color.FromArgb(78, 203, 131); Warn = Color.FromArgb(229, 170, 66); Bad = Color.FromArgb(244, 104, 104);
+            }
+            else
+            {
+                Bg = Color.FromArgb(243, 244, 247); Card = Color.FromArgb(255, 255, 255); Raised = Color.FromArgb(232, 235, 241);
+                Border = Color.FromArgb(210, 215, 224); Text = Color.FromArgb(24, 27, 34); Muted = Color.FromArgb(98, 106, 122);
+                Accent = Color.FromArgb(58, 106, 240); Good = Color.FromArgb(22, 145, 80); Warn = Color.FromArgb(190, 120, 10); Bad = Color.FromArgb(210, 58, 58);
+            }
+        }
+
+        public static Color[] Palette() { return new[] { Bg, Card, Raised, Border, Text, Muted, Accent, Good, Warn, Bad }; }
+
+        // Follows Windows' "app mode" setting until the user picks one.
+        public static bool SystemDark()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
+                {
+                    object v = k == null ? null : k.GetValue("AppsUseLightTheme");
+                    return !(v is int) || (int)v == 0;
+                }
+            }
+            catch { return true; }
+        }
+
         public const TextFormatFlags Line = TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis;
 
         public static float Scale = 1;
@@ -162,7 +190,7 @@ namespace GameCompressor
             Color fill = Primary ? Theme.Accent : Theme.Raised;
             if (!Enabled) fill = Theme.Mix(fill, back, 0.65);
             else if (down) fill = Theme.Mix(fill, Color.Black, 0.18);
-            else if (hover) fill = Theme.Mix(fill, Color.White, 0.10);
+            else if (hover) fill = Theme.Mix(fill, Theme.Text, 0.08);
             Theme.Fill(g, ClientRectangle, Theme.S(7), fill);
             if (!Primary && Enabled) Theme.Stroke(g, ClientRectangle, Theme.S(7), Theme.Border, false);
             if (Focused && ShowFocusCues) Theme.Stroke(g, ClientRectangle, Theme.S(7), Theme.Text, false);
@@ -299,6 +327,11 @@ namespace GameCompressor
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         }
 
+        public void Remap(Dictionary<Color, Color> map)
+        {
+            Color n;
+            if (map.TryGetValue(color, out n)) color = n;
+        }
 
         public void Set(int percent, Color c)
         {
@@ -388,8 +421,10 @@ namespace GameCompressor
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            Native.SetWindowTheme(Handle, "DarkMode_Explorer", null);
+            ApplyScrollTheme();
         }
+
+        public void ApplyScrollTheme() { Native.SetWindowTheme(Handle, Theme.Dark ? "DarkMode_Explorer" : "Explorer", null); }
 
         public void Relayout()
         {
@@ -704,7 +739,7 @@ namespace GameCompressor
         QueueView queue;
         Segmented segLevel, segDict, segOut;
         Toggle togLowPrio;
-        FlatButton btnBrowse, btnClear, btnStart, btnPause, btnCancel;
+        FlatButton btnBrowse, btnClear, btnTheme, btnStart, btnPause, btnCancel;
         Meter meter;
         Label lblLevelHint, lblOut, lblSummary, lblStatus, lblFile;
 
@@ -721,6 +756,9 @@ namespace GameCompressor
             float scale;
             using (Graphics g = Graphics.FromHwnd(IntPtr.Zero)) scale = g.DpiX / 96f;
             Theme.Init(scale);
+            Dictionary<string, string> cfg = LoadSettings();
+            string mode;
+            Theme.SetDark(cfg.TryGetValue("theme", out mode) ? mode != "light" : Theme.SystemDark());
 
             Text = AppName;
             Font = Theme.Font;
@@ -735,7 +773,6 @@ namespace GameCompressor
 
             BuildUi();
             HookDrop(this);
-            Dictionary<string, string> cfg = LoadSettings();
             ApplySettings(cfg);
 
             string saved;
@@ -751,10 +788,48 @@ namespace GameCompressor
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
-            // Dark title bar, tinted to match the window where Windows allows it.
-            int on = 1, caption = Theme.Bg.R | Theme.Bg.G << 8 | Theme.Bg.B << 16;
-            Native.DwmSetWindowAttribute(Handle, 20, ref on, 4);
+            ApplyTitleBar();
+        }
+
+        // Title bar in the same mode, tinted to match the window where Windows allows it.
+        void ApplyTitleBar()
+        {
+            int dark = Theme.Dark ? 1 : 0, caption = Theme.Bg.R | Theme.Bg.G << 8 | Theme.Bg.B << 16;
+            Native.DwmSetWindowAttribute(Handle, 20, ref dark, 4);
             Native.DwmSetWindowAttribute(Handle, 35, ref caption, 4);
+        }
+
+        void ToggleTheme()
+        {
+            Color[] before = Theme.Palette();
+            Theme.SetDark(!Theme.Dark);
+            Color[] after = Theme.Palette();
+            var map = new Dictionary<Color, Color>();
+            for (int i = 0; i < before.Length; i++) map[before[i]] = after[i];
+
+            SuspendLayout();
+            Recolor(this, map);
+            meter.Remap(map);
+            queue.ApplyScrollTheme();
+            ApplyTitleBar();
+            UpdateThemeButton();
+            ResumeLayout();
+            Invalidate(true);
+            SaveSettings();
+        }
+
+        static void Recolor(Control c, Dictionary<Color, Color> map)
+        {
+            Color n;
+            if (map.TryGetValue(c.BackColor, out n)) c.BackColor = n;
+            if (map.TryGetValue(c.ForeColor, out n)) c.ForeColor = n;
+            foreach (Control child in c.Controls) Recolor(child, map);
+        }
+
+        void UpdateThemeButton()
+        {
+            btnTheme.Text = Theme.Dark ? "\uE706" : "\uE708";   // sun in dark mode, moon in light mode
+            tips.SetToolTip(btnTheme, Theme.Dark ? "Switch to light mode" : "Switch to dark mode");
         }
 
         protected override void OnLoad(EventArgs e)
@@ -798,13 +873,17 @@ namespace GameCompressor
             var adders = NewFlow();
             adders.Anchor = AnchorStyles.Right;
             btnClear = NewButton("Clear", delegate { RemoveWhere(delegate(Job j) { return true; }); });
-
+            btnTheme = NewButton("", delegate { ToggleTheme(); });
+            btnTheme.Font = new Font("Segoe MDL2 Assets", 12f);
+            btnTheme.Size = new Size(S(40), S(34));
             adders.Controls.AddRange(new Control[]
             {
                 NewButton("Add Folder...", delegate { AddPaths(Shell.PickFolders(this, "Choose game folders to compress", true)); }),
                 NewButton("Add Files...", delegate { AddFilesClick(); }),
-                btnClear
+                btnClear,
+                btnTheme
             });
+            UpdateThemeButton();
             header.Controls.Add(titles, 0, 0);
             header.Controls.Add(adders, 1, 0);
             root.Controls.Add(header, 0, 0);
@@ -1699,7 +1778,7 @@ namespace GameCompressor
                 "outmode=" + segOut.SelectedIndex,
                 "outdir=" + outDir,
                 "lowprio=" + (togLowPrio.Checked ? 1 : 0),
-
+                "theme=" + (Theme.Dark ? "dark" : "light"),
                 "sevenzip=" + sevenZip
             };
             // Settings travel with the app; if its folder is read-only they go to the user profile instead.
