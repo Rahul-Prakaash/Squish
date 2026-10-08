@@ -34,6 +34,7 @@ copy /y "%HERE%Squish.exe" "%OUT%\" >nul
 copy /y "%HERE%README.txt" "%OUT%\" >nul
 copy /y "%SZ%7z.exe" "%OUT%\7-Zip\" >nul
 copy /y "%SZ%7z.dll" "%OUT%\7-Zip\" >nul
+if exist "%SZ%7z.sfx" copy /y "%SZ%7z.sfx" "%OUT%\7-Zip\" >nul
 copy /y "%SZ%License.txt" "%OUT%\7-Zip\" >nul
 copy /y "%HERE%fonts\OFL.txt" "%OUT%\Font license (Jost).txt" >nul
 "%SZ%7z.exe" a -tzip -mx=9 -bso0 -bsp0 "%HERE%Portable\Squish-Portable.zip" "%OUT%" >nul

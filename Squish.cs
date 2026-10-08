@@ -46,7 +46,8 @@ namespace Squish
         public long Packed = -1;    // real archive size, once finished
         public long Est = -1;       // predicted archive size
         public bool Estimating, EstFailed;
-        public string Archive;
+        public string Archive;      // the archive, or its first volume
+        public List<string> Parts;  // every file that makes up the archive (more than one when split into volumes)
         public JobState State;
         public bool Verified;
         public int Pct;
@@ -56,8 +57,12 @@ namespace Squish
 
     class Options
     {
-        public int Mx;
-        public int DictMb;          // 0 = let 7-Zip decide
+        public string Pack;         // format, level and method switches
+        public string Finish;       // volumes, self-extracting, encryption mode
+        public string Secret;       // the password switch, also needed to test the archive
+        public string Filters;      // include/exclude switches, also applied when hashing the originals
+        public string Extension;    // ".7z", ".zip", ".tar" or ".exe"
+        public string Summary;      // shown in the verification report
         public string OutDir;       // null = next to the original
         public bool LowPriority;
     }
@@ -213,6 +218,14 @@ namespace Squish
                 if (dashed) pen.DashPattern = new[] { 5f, 4f };
                 g.DrawPath(pen, p);
             }
+        }
+
+        // Title bar in the same mode, tinted to match the top of the window where Windows allows it.
+        public static void StyleTitleBar(IntPtr handle)
+        {
+            int dark = Dark ? 1 : 0, caption = BgTop.R | BgTop.G << 8 | BgTop.B << 16;
+            Native.DwmSetWindowAttribute(handle, 20, ref dark, 4);
+            Native.DwmSetWindowAttribute(handle, 35, ref caption, 4);
         }
 
         static bool OnCard(Control c)
@@ -528,6 +541,676 @@ namespace Squish
         }
     }
 
+    // ------------------------------------------------------- Advanced settings
+
+    // The compression recipe. The main window's simple controls only set Level and Dict; the Advanced
+    // dialog can set everything, mirroring 7-Zip's own "Add to Archive" options. Empty strings mean "auto".
+    class Config
+    {
+        public bool Custom;             // false = the simple controls on the main window decide
+        public string Format = "7z";
+        public int Level = 9;
+        public string Method = "", Dict = "", Word = "", Solid = "", Threads = "", Memory = "", Volume = "", Encryption = "";
+        public bool Sfx, Shared, EncryptNames;
+        public string Password = "";    // never written to disk
+        public string Extra = "";       // raw 7-Zip switches
+
+        public static readonly string[] Formats = { "7z", "zip", "tar" };
+        public static readonly int[] Levels = { 0, 1, 3, 5, 7, 9 };
+        public static readonly string[] LevelNames = { "Store", "Fastest", "Fast", "Normal", "Maximum", "Ultra" };
+        public static readonly string[] Solids = { "", "off", "16m", "64m", "256m", "1g", "4g", "16g", "64g", "on" };
+        public static readonly string[] Memories = { "", "p20", "p40", "p60", "p80" };
+        public static readonly string[] Volumes = { "", "10m", "100m", "700m", "1g", "2g", "4092m", "4480m", "8128m", "23040m" };
+        public static readonly string[] VolumeNames = { "No", "10 MB", "100 MB", "700 MB (CD)", "1 GB", "2 GB", "4092 MB (FAT32)", "4480 MB (DVD)", "8128 MB (DVD DL)", "23040 MB (Blu-ray)" };
+
+        // Switches that would break the app's promises or its plumbing. -sdel deletes the originals.
+        static readonly string[] Blocked = { "-sdel", "-so", "-si", "-bs", "-bb", "-bd", "-scc", "-scs", "-sa", "-sfx", "-p", "-t", "-v", "-ao", "-u", "-o", "-ad", "-y" };
+
+        public Config Clone() { return (Config)MemberwiseClone(); }
+
+        public static string[] Methods(string format)
+        {
+            if (format == "7z") return new[] { "LZMA2", "LZMA", "PPMd", "BZip2" };
+            if (format == "zip") return new[] { "Deflate", "Deflate64", "BZip2", "LZMA", "PPMd" };
+            return new string[0];
+        }
+
+        // The method actually used: none for tar or Store, otherwise the chosen one or the format's default.
+        public string EffectiveMethod
+        {
+            get
+            {
+                string[] m = Methods(Format);
+                return m.Length == 0 || Level == 0 ? "" : Array.IndexOf(m, Method) >= 0 ? Method : m[0];
+            }
+        }
+
+        public static string[] Dicts(string method, long ramMb)
+        {
+            var list = new List<string> { "" };
+            if (method == "LZMA" || method == "LZMA2")
+            {
+                // LZMA needs roughly 11x the dictionary in RAM while compressing.
+                foreach (string d in new[] { "64k", "256k", "1m", "2m", "4m", "8m", "16m", "32m", "64m", "128m", "256m", "512m", "1024m", "1536m" })
+                    if (Megabytes(d) * 12 <= ramMb * 0.6) list.Add(d);
+            }
+            else if (method == "PPMd")
+            {
+                foreach (string d in new[] { "1m", "4m", "16m", "32m", "64m", "128m", "256m", "512m", "1024m" })
+                    if (Megabytes(d) <= ramMb * 0.5) list.Add(d);
+            }
+            else if (method == "BZip2") list.AddRange(new[] { "100k", "300k", "500k", "700k", "900k" });
+            return list.ToArray();
+        }
+
+        public static string[] Words(string method)
+        {
+            if (method == "LZMA" || method == "LZMA2") return new[] { "", "8", "12", "16", "24", "32", "48", "64", "96", "128", "192", "256", "273" };
+            if (method == "Deflate") return new[] { "", "8", "12", "16", "24", "32", "48", "64", "96", "128", "192", "256", "258" };
+            if (method == "Deflate64") return new[] { "", "8", "12", "16", "24", "32", "48", "64", "96", "128", "192", "256", "257" };
+            if (method == "PPMd") return new[] { "", "2", "3", "4", "5", "6", "7", "8", "10", "12", "16", "24", "32" };
+            return new[] { "" };
+        }
+
+        public static string[] ThreadChoices()
+        {
+            var list = new List<string> { "" };
+            int cores = Environment.ProcessorCount;
+            for (int n = 1; n < cores; n *= 2) list.Add(n.ToString());
+            list.Add(cores.ToString());
+            return list.ToArray();
+        }
+
+        static double Megabytes(string size)
+        {
+            double n = double.Parse(size.Substring(0, size.Length - 1));
+            return size.EndsWith("k") ? n / 1024 : size.EndsWith("g") ? n * 1024 : n;
+        }
+
+        public static string SizeName(string size)
+        {
+            if (size == "") return "Auto";
+            return size.Substring(0, size.Length - 1) + (size.EndsWith("k") ? " KB" : size.EndsWith("g") ? " GB" : " MB");
+        }
+
+        // Clears choices that do not belong to the current format and method (after a change, or from an old settings file).
+        public void Normalize(long ramMb)
+        {
+            if (Array.IndexOf(Formats, Format) < 0) Format = "7z";
+            if (Array.IndexOf(Levels, Level) < 0) Level = 9;
+            Method = EffectiveMethod;
+            if (Array.IndexOf(Dicts(Method, ramMb), Dict) < 0) Dict = "";
+            if (Array.IndexOf(Words(Method), Word) < 0) Word = "";
+            if (Format != "7z" || Array.IndexOf(Solids, Solid) < 0) Solid = "";
+            if (Array.IndexOf(ThreadChoices(), Threads) < 0) Threads = "";
+            if (Array.IndexOf(Memories, Memory) < 0) Memory = "";
+            if (Array.IndexOf(Volumes, Volume) < 0) Volume = "";
+            if (Format != "7z") { Sfx = false; EncryptNames = false; }
+            if (Format == "tar") Password = "";
+            Encryption = Format == "zip" && Encryption == "ZipCrypto" ? "ZipCrypto" : "";
+        }
+
+        // Format, level and method switches. Also used for the size prediction, so nothing secret goes here.
+        public string Core()
+        {
+            var sb = new StringBuilder("-t" + Format + (Format == "tar" ? "" : " -mx=" + Level));
+            string m = EffectiveMethod;
+            if (Format == "7z")
+            {
+                if (!Custom) { if (Dict != "") sb.Append(" -md=" + Dict); }
+                else if (m != "")
+                {
+                    sb.Append(" -m0=" + m);
+                    if (Dict != "") sb.Append((m == "PPMd" ? ":mem=" : ":d=") + Dict);
+                    if (Word != "") sb.Append((m == "PPMd" ? ":o=" : ":fb=") + Word);
+                }
+                if (Solid != "") sb.Append(" -ms=" + Solid);
+            }
+            else if (Format == "zip" && m != "")
+            {
+                sb.Append(" -mm=" + m);
+                if (Dict != "") sb.Append((m == "PPMd" ? " -mmem=" : " -md=") + Dict);
+                if (Word != "") sb.Append((m == "PPMd" ? " -mo=" : " -mfb=") + Word);
+            }
+            if (Threads != "") sb.Append(" -mmt=" + Threads);
+            if (Memory != "") sb.Append(" -mmemuse=" + Memory);
+            foreach (string t in Tokens(Extra)) if (!IsFilter(t)) sb.Append(" " + t);
+            return sb.ToString();
+        }
+
+        // Switches that shape the output file rather than the compression.
+        public string Finish()
+        {
+            string s = "";
+            if (Format == "7z" && Sfx) s += " -sfx";
+            else if (Volume != "") s += " -v" + Volume;
+            if (Shared) s += " -ssw";
+            if (Password != "" && Format == "7z" && EncryptNames) s += " -mhe=on";
+            if (Password != "" && Format == "zip") s += " -mem=" + (Encryption == "ZipCrypto" ? "ZipCrypto" : "AES256");
+            return s;
+        }
+
+        // 7-Zip splits its command line on quotes only, so a password may hold anything except a double quote.
+        public string Secret() { return Password != "" && Format != "tar" ? " \"-p" + Password + "\"" : ""; }
+
+        // Include/exclude switches also apply when the originals are hashed, so the lossless check compares like with like.
+        public string Filters()
+        {
+            string s = "";
+            foreach (string t in Tokens(Extra)) if (IsFilter(t)) s += " " + t;
+            return s;
+        }
+
+        public string Extension() { return Format == "7z" && Sfx ? ".exe" : "." + Format; }
+
+        public string Describe()
+        {
+            var parts = new List<string> { Format == "7z" && Sfx ? "self-extracting 7z" : Format };
+            if (Format != "tar") parts.Add(LevelNames[Math.Max(0, Array.IndexOf(Levels, Level))] + (EffectiveMethod != "" ? " " + EffectiveMethod : ""));
+            if (Dict != "") parts.Add(SizeName(Dict) + " dictionary");
+            if (Solid != "") parts.Add(Solid == "off" ? "non-solid" : Solid == "on" ? "solid" : SizeName(Solid) + " solid blocks");
+            if (Volume != "" && !(Format == "7z" && Sfx)) parts.Add("split " + SizeName(Volume));
+            if (Password != "" && Format != "tar") parts.Add("encrypted");
+            if (Extra.Trim() != "") parts.Add("extra switches");
+            return string.Join(", ", parts);
+        }
+
+        public string Preview()
+        {
+            return "7z a " + Core() + Finish() + (Secret() != "" ? " -p\u2022\u2022\u2022\u2022" : "") + Filters();
+        }
+
+        // Returns what is wrong with the raw switches, or null if they are acceptable.
+        public static string Check(string extra)
+        {
+            foreach (string t in Tokens(extra))
+            {
+                if (!t.StartsWith("-")) return "\"" + t + "\" is not a switch. Parameters must be 7-Zip switches that start with a dash.";
+                string low = t.ToLowerInvariant();
+                if (low.StartsWith("-sdel")) return "-sdel deletes the original files after compressing. Squish never touches your originals, so it is not allowed.";
+                foreach (string b in Blocked)
+                    if (low.StartsWith(b) && !IsFilter(t)) return t + " can't be used here. Squish sets that itself (use the options in this window instead).";
+            }
+            return null;
+        }
+
+        static bool IsFilter(string token)
+        {
+            string low = token.ToLowerInvariant();
+            return low.StartsWith("-x") || low.StartsWith("-i") || low == "-r" || low == "-r0" || low == "-r-";
+        }
+
+        // Splits on spaces, keeping quoted parts together.
+        static List<string> Tokens(string text)
+        {
+            var list = new List<string>();
+            var cur = new StringBuilder();
+            bool quoted = false;
+            foreach (char ch in text ?? "")
+            {
+                if (ch == '"') quoted = !quoted;
+                if (char.IsWhiteSpace(ch) && !quoted) { if (cur.Length > 0) list.Add(cur.ToString()); cur.Length = 0; }
+                else cur.Append(ch);
+            }
+            if (cur.Length > 0) list.Add(cur.ToString());
+            return list;
+        }
+
+        public string[] ToLines()
+        {
+            return new[]
+            {
+                "adv.custom=" + (Custom ? 1 : 0), "adv.format=" + Format, "adv.level=" + Level, "adv.method=" + Method,
+                "adv.dict=" + Dict, "adv.word=" + Word, "adv.solid=" + Solid, "adv.threads=" + Threads, "adv.memory=" + Memory,
+                "adv.volume=" + Volume, "adv.encryption=" + Encryption, "adv.sfx=" + (Sfx ? 1 : 0), "adv.shared=" + (Shared ? 1 : 0),
+                "adv.names=" + (EncryptNames ? 1 : 0), "adv.extra=" + Extra
+            };
+        }
+
+        public static Config FromSettings(Dictionary<string, string> cfg, long ramMb)
+        {
+            var c = new Config();
+            string v; int n;
+            c.Custom = cfg.TryGetValue("adv.custom", out v) && v == "1";
+            if (cfg.TryGetValue("adv.format", out v)) c.Format = v;
+            if (cfg.TryGetValue("adv.level", out v) && int.TryParse(v, out n)) c.Level = n;
+            if (cfg.TryGetValue("adv.method", out v)) c.Method = v;
+            if (cfg.TryGetValue("adv.dict", out v)) c.Dict = v;
+            if (cfg.TryGetValue("adv.word", out v)) c.Word = v;
+            if (cfg.TryGetValue("adv.solid", out v)) c.Solid = v;
+            if (cfg.TryGetValue("adv.threads", out v)) c.Threads = v;
+            if (cfg.TryGetValue("adv.memory", out v)) c.Memory = v;
+            if (cfg.TryGetValue("adv.volume", out v)) c.Volume = v;
+            if (cfg.TryGetValue("adv.encryption", out v)) c.Encryption = v;
+            c.Sfx = cfg.TryGetValue("adv.sfx", out v) && v == "1";
+            c.Shared = cfg.TryGetValue("adv.shared", out v) && v == "1";
+            c.EncryptNames = cfg.TryGetValue("adv.names", out v) && v == "1";
+            if (cfg.TryGetValue("adv.extra", out v) && Check(v) == null) c.Extra = v;
+            c.Normalize(ramMb);
+            return c;
+        }
+    }
+
+    // A themed drop-down list.
+    class Dropdown : Control
+    {
+        string[] labels = { "" }, values = { "" };
+        int index;
+        bool hover;
+
+        public event EventHandler Changed;
+
+        public Dropdown()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            Size = new Size(Theme.S(230), Theme.S(32));
+            Cursor = Cursors.Hand;
+        }
+
+        public string Value { get { return values[index]; } }
+
+        public void SetItems(string[] names, string[] vals, string selected)
+        {
+            labels = names; values = vals;
+            index = Math.Max(0, Array.IndexOf(vals, selected));
+            Invalidate();
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); }
+        protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left || labels.Length < 2) return;
+            var list = new PopupList(labels, index, Width);
+            var host = new ToolStripControlHost(list) { Margin = Padding.Empty, Padding = Padding.Empty, AutoSize = false, Size = list.Size };
+            var drop = new ToolStripDropDown { Padding = new Padding(1), Margin = Padding.Empty, BackColor = Theme.Border, AutoSize = false, Size = new Size(list.Width + 2, list.Height + 2) };
+            drop.Items.Add(host);
+            list.Picked += delegate(int i)
+            {
+                drop.Close();
+                if (i == index) return;
+                index = i;
+                Invalidate();
+                if (Changed != null) Changed(this, EventArgs.Empty);
+            };
+            drop.Show(this, new Point(0, Height + Theme.S(3)));
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            Color back = Theme.Behind(this);
+            Theme.PaintBackdrop(g, this);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            bool live = Enabled && labels.Length > 1;
+            Theme.Fill(g, ClientRectangle, Theme.S(9), live ? (hover ? Theme.Mix(Theme.Raised, Theme.Text, 0.08) : Theme.Raised) : Theme.Mix(Theme.Raised, back, 0.6));
+            if (live) Theme.Stroke(g, ClientRectangle, Theme.S(9), Theme.Border, false);
+            Color text = live ? Theme.Text : Theme.Mix(Theme.Muted, back, 0.35);
+            TextRenderer.DrawText(g, labels[index], Theme.Font, new Rectangle(Theme.S(12), 0, Width - Theme.S(44), Height), text, Theme.Line);
+            if (live) TextRenderer.DrawText(g, "\uE70D", Theme.IconSmall, new Rectangle(Width - Theme.S(34), 0, Theme.S(28), Height), Theme.Muted, Theme.Line | TextFormatFlags.HorizontalCenter);
+        }
+    }
+
+    // The list a Dropdown opens.
+    class PopupList : Control
+    {
+        readonly string[] items;
+        readonly int selected, rowH = Theme.S(30);
+        int hover = -1;
+
+        public event Action<int> Picked;
+
+        public PopupList(string[] items, int selected, int width)
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+            this.items = items; this.selected = selected;
+            Size = new Size(width - 2, items.Length * rowH + Theme.S(8));
+        }
+
+        int RowAt(int y)
+        {
+            int i = (y - Theme.S(4)) / rowH;
+            return y >= Theme.S(4) && i < items.Length ? i : -1;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            int i = RowAt(e.Y);
+            if (i != hover) { hover = i; Invalidate(); }
+        }
+
+        protected override void OnMouseLeave(EventArgs e) { hover = -1; Invalidate(); }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            int i = RowAt(e.Y);
+            if (i >= 0 && Picked != null) Picked(i);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.Clear(Theme.Card);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            for (int i = 0; i < items.Length; i++)
+            {
+                var r = new Rectangle(Theme.S(4), Theme.S(4) + i * rowH, Width - Theme.S(8), rowH);
+                if (i == selected) Theme.FillGradient(g, r, Theme.S(7), Theme.Accent, Theme.Accent2);
+                else if (i == hover) Theme.Fill(g, r, Theme.S(7), Theme.Raised);
+                TextRenderer.DrawText(g, items[i], Theme.Font, new Rectangle(r.X + Theme.S(10), r.Y, r.Width - Theme.S(14), r.Height), i == selected ? Color.White : Theme.Text, Theme.Line);
+            }
+        }
+    }
+
+    // A themed single-line text box.
+    class TextField : Control
+    {
+        public readonly TextBox Box = new TextBox { BorderStyle = BorderStyle.None };
+
+        public TextField()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            Box.Font = Theme.Font;
+            Box.BackColor = Theme.Raised;
+            Box.ForeColor = Theme.Text;
+            Box.GotFocus += delegate { Invalidate(); };
+            Box.LostFocus += delegate { Invalidate(); };
+            Controls.Add(Box);
+            Size = new Size(Theme.S(230), Theme.S(32));
+        }
+
+        protected override void OnLayout(LayoutEventArgs e)
+        {
+            Box.SetBounds(Theme.S(11), (Height - Box.Height) / 2, Math.Max(10, Width - Theme.S(22)), Box.Height);
+        }
+
+        protected override void OnEnabledChanged(EventArgs e)
+        {
+            Box.BackColor = Enabled ? Theme.Raised : Theme.Mix(Theme.Raised, Theme.Behind(this), 0.6);
+            Invalidate();
+            base.OnEnabledChanged(e);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Theme.PaintBackdrop(e.Graphics, this);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Theme.Fill(e.Graphics, ClientRectangle, Theme.S(9), Box.BackColor);
+            if (Enabled) Theme.Stroke(e.Graphics, ClientRectangle, Theme.S(9), Box.Focused ? Theme.Accent : Theme.Border, false);
+        }
+    }
+
+    // The Advanced dialog: the choices from 7-Zip's "Add to Archive" window, in the app's theme.
+    class AdvancedForm : Form
+    {
+        public Config Result;
+
+        readonly Config c;
+        readonly long ramMb;
+        readonly bool sfxAvailable;
+        readonly ToolTip tips = new ToolTip();
+        Dropdown ddFormat, ddLevel, ddMethod, ddDict, ddWord, ddSolid, ddThreads, ddMemory, ddVolume, ddEncryption;
+        TextField txtPassword, txtExtra;
+        Toggle togNames, togShow, togSfx, togShared;
+        Label lblPreview;
+        bool loading;
+
+        public AdvancedForm(Config start, long ramMb, bool sfxAvailable)
+        {
+            c = start.Clone();
+            c.Custom = true;
+            this.ramMb = ramMb;
+            this.sfxAvailable = sfxAvailable;
+            c.Normalize(ramMb);
+
+            Text = "Advanced settings";
+            Font = Theme.Font;
+            BackColor = Theme.Bg;
+            ForeColor = Theme.Text;
+            AutoScaleMode = AutoScaleMode.None;
+            DoubleBuffered = true;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = MinimizeBox = false;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.CenterParent;
+            Rectangle work = Screen.PrimaryScreen.WorkingArea;
+            ClientSize = new Size(Math.Min(Theme.S(860), work.Width - Theme.S(24)), Math.Min(Theme.S(552), work.Height - Theme.S(48)));
+
+            Build();
+            Fill();
+        }
+
+        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Theme.StyleTitleBar(Handle); }
+        protected override void OnPaintBackground(PaintEventArgs e) { Theme.PaintBackdrop(e.Graphics, this); }
+
+        static int S(int v) { return Theme.S(v); }
+
+        void Build()
+        {
+            var root = new Table { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(S(18), S(14), S(18), S(16)) };
+            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            Controls.Add(root);
+
+            root.Controls.Add(new Label
+            {
+                Text = "7-Zip's Add to Archive options. Whatever you pick, the archive is still verified lossless with SHA-256.",
+                AutoSize = false, Dock = DockStyle.Fill, Height = S(26), AutoEllipsis = true, UseMnemonic = false, ForeColor = Theme.Muted, Margin = new Padding(S(2), 0, 0, S(10))
+            }, 0, 0);
+
+            var card = new CardPanel { Dock = DockStyle.Fill, Padding = new Padding(S(18), S(12), S(18), S(12)), Margin = new Padding(0) };
+            var grid = new Table { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 11 };
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            for (int i = 0; i < 10; i++) grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            card.Controls.Add(grid);
+            root.Controls.Add(card, 0, 1);
+
+            // Left: how to compress
+            ddFormat = Add(grid, 0, 0, "Archive format", "7z compresses best. zip opens everywhere without extra software. tar only bundles files, with no compression.");
+            ddLevel = Add(grid, 0, 1, "Compression level", "How hard 7-Zip works. Every level is lossless.");
+            ddMethod = Add(grid, 0, 2, "Compression method", "LZMA2 is the usual choice. PPMd is strong on plain text. BZip2 and Deflate are older and more widely supported.");
+            ddDict = Add(grid, 0, 3, "Dictionary size", "How far back the compressor looks for repeated data. Bigger can compress more and needs more RAM.");
+            ddWord = Add(grid, 0, 4, "Word size", "How long a match the compressor searches for (the model order for PPMd). Bigger is slower and can compress slightly more.");
+            ddSolid = Add(grid, 0, 5, "Solid block size", "7z only. Files in the same block are compressed together, which shrinks more but makes extracting one file slower.");
+            ddThreads = Add(grid, 0, 6, "CPU threads", "How many processor threads 7-Zip may use.");
+            ddMemory = Add(grid, 0, 7, "Memory limit", "The most RAM 7-Zip may use while compressing. It lowers the thread count to stay under it.");
+
+            // Right: what comes out
+            ddVolume = Add(grid, 2, 0, "Split into volumes", "Cuts the archive into pieces of this size: name.001, name.002 and so on.");
+            grid.Controls.Add(NewLabel("Password", S(26)), 2, 1);
+            txtPassword = new TextField { Dock = DockStyle.Fill, Margin = new Padding(0, S(4), 0, S(4)) };
+            txtPassword.Box.UseSystemPasswordChar = true;
+            txtPassword.Box.TextChanged += delegate { Changed(); };
+            tips.SetToolTip(txtPassword.Box, "Leave empty for no encryption. The password is never saved, and there is no way to recover it.");
+            grid.Controls.Add(txtPassword, 3, 1);
+            ddEncryption = Add(grid, 2, 2, "Encryption", "AES-256 is strong. ZipCrypto is weak and only useful for very old unzip programs.");
+
+            togNames = NewToggle("Encrypt file names too", "7z only. Without the password, nobody can even see what the archive contains.");
+            togShow = NewToggle("Show password", "");
+            togSfx = NewToggle("Self-extracting archive (.exe)", sfxAvailable ? "7z only. Makes a program that unpacks itself, so the other person does not need 7-Zip." : "Not available: this copy of 7-Zip has no 7z.sfx module.");
+            togShared = NewToggle("Include files open in other programs", "Also reads files that another program has open for writing.");
+            Toggle[] toggles = { togNames, togShow, togSfx, togShared };
+            for (int i = 0; i < toggles.Length; i++)
+            {
+                grid.Controls.Add(toggles[i], 2, 3 + i);
+                grid.SetColumnSpan(toggles[i], 2);
+            }
+
+            grid.Controls.Add(NewLabel("Parameters", 0), 0, 8);
+            txtExtra = new TextField { Dock = DockStyle.Fill, Margin = new Padding(0, S(4), 0, S(4)) };
+            txtExtra.Box.TextChanged += delegate { Changed(); };
+            tips.SetToolTip(txtExtra.Box, "Extra 7-Zip switches, for example  -xr!*.tmp  to leave out temp files, or  -mqs=on .\r\nInclude and exclude switches are applied to the lossless check as well.");
+            grid.Controls.Add(txtExtra, 1, 8);
+            grid.SetColumnSpan(txtExtra, 3);
+
+            lblPreview = new Label { Dock = DockStyle.Fill, AutoSize = false, Height = S(24), AutoEllipsis = true, UseMnemonic = false, Font = Theme.Small, ForeColor = Theme.Muted, TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(0, S(4), 0, 0) };
+            grid.Controls.Add(lblPreview, 0, 9);
+            grid.SetColumnSpan(lblPreview, 4);
+
+            // Buttons
+            var bottom = new Table { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, RowCount = 1, Margin = new Padding(0, S(14), 0, 0) };
+            bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            FlatButton simple = NewButton("Use simple settings", false, delegate
+            {
+                Read();
+                Result = c.Clone();
+                Result.Custom = false;
+                Result.Password = "";
+                DialogResult = DialogResult.OK;
+            });
+            simple.Anchor = AnchorStyles.Left;
+            tips.SetToolTip(simple, "Go back to the Compression and Dictionary choices on the main window.");
+            var actions = new Flow { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty };
+            FlatButton cancel = NewButton("Cancel", false, delegate { DialogResult = DialogResult.Cancel; });
+            FlatButton ok = NewButton("OK", true, delegate { Accept(); });
+            actions.Controls.AddRange(new Control[] { cancel, ok });
+            bottom.Controls.Add(simple, 0, 0);
+            bottom.Controls.Add(actions, 1, 0);
+            root.Controls.Add(bottom, 0, 2);
+            AcceptButton = ok;
+            CancelButton = cancel;
+
+            foreach (Control l in new Control[] { root, grid })
+                foreach (Control child in l.Controls) if (child is Label) child.BackColor = Color.Transparent;
+        }
+
+        Label NewLabel(string text, int leftGap)
+        {
+            return new Label { Text = text, AutoSize = true, Anchor = AnchorStyles.Left, ForeColor = Theme.Muted, Margin = new Padding(leftGap, 0, S(14), 0) };
+        }
+
+        Dropdown Add(Table grid, int column, int row, string label, string tip)
+        {
+            grid.Controls.Add(NewLabel(label, column == 0 ? 0 : S(26)), column, row);
+            var d = new Dropdown { Margin = new Padding(0, S(4), 0, S(4)) };
+            if (column > 0) d.Dock = DockStyle.Fill;
+            d.Changed += delegate { Changed(); };
+            tips.SetToolTip(d, tip);
+            grid.Controls.Add(d, column + 1, row);
+            return d;
+        }
+
+        Toggle NewToggle(string text, string tip)
+        {
+            var t = new Toggle { Text = text, Margin = new Padding(S(26), S(5), 0, S(5)) };
+            t.CheckedChanged += delegate { Changed(); };
+            if (tip != "") tips.SetToolTip(t, tip);
+            return t;
+        }
+
+        FlatButton NewButton(string text, bool primary, EventHandler click)
+        {
+            var b = new FlatButton { Text = text, Primary = primary, Font = primary ? Theme.Bold : Theme.Font, Margin = new Padding(S(8), 0, 0, 0) };
+            b.Size = new Size(Math.Max(S(104), TextRenderer.MeasureText(text, b.Font).Width + S(34)), S(38));
+            b.Click += click;
+            return b;
+        }
+
+        // Puts the settings into the controls.
+        void Fill()
+        {
+            loading = true;
+            txtPassword.Box.Text = c.Password;
+            txtExtra.Box.Text = c.Extra;
+            togNames.Checked = c.EncryptNames;
+            togSfx.Checked = c.Sfx && sfxAvailable;
+            togShared.Checked = c.Shared;
+            ddFormat.SetItems(Config.Formats, Config.Formats, c.Format);
+            ddLevel.SetItems(Config.LevelNames, Array.ConvertAll(Config.Levels, delegate(int l) { return l.ToString(); }), c.Level.ToString());
+            ddSolid.SetItems(Array.ConvertAll(Config.Solids, delegate(string s) { return s == "off" ? "Non-solid" : s == "on" ? "Solid" : Config.SizeName(s); }), Config.Solids, c.Solid);
+            string[] threads = Config.ThreadChoices();
+            ddThreads.SetItems(Array.ConvertAll(threads, delegate(string s) { return s == "" ? "Auto" : s; }), threads, c.Threads);
+            ddMemory.SetItems(Array.ConvertAll(Config.Memories, delegate(string s) { return s == "" ? "Auto" : s.Substring(1) + "% of RAM"; }), Config.Memories, c.Memory);
+            ddVolume.SetItems(Config.VolumeNames, Config.Volumes, c.Volume);
+            loading = false;
+            Dependents();
+        }
+
+        // Reads the controls back into the settings.
+        void Read()
+        {
+            c.Format = ddFormat.Value;
+            c.Level = int.Parse(ddLevel.Value);
+            c.Method = ddMethod.Value;
+            c.Dict = ddDict.Value;
+            c.Word = ddWord.Value;
+            c.Solid = ddSolid.Value;
+            c.Threads = ddThreads.Value;
+            c.Memory = ddMemory.Value;
+            c.Volume = ddVolume.Value;
+            c.Encryption = ddEncryption.Value;
+            c.Password = txtPassword.Box.Text;
+            c.Extra = txtExtra.Box.Text.Trim();
+            c.EncryptNames = togNames.Checked;
+            c.Sfx = togSfx.Checked;
+            c.Shared = togShared.Checked;
+        }
+
+        void Changed()
+        {
+            if (loading) return;
+            Read();
+            Dependents();
+        }
+
+        // The method, dictionary, word and encryption lists depend on the format and method, as in 7-Zip.
+        void Dependents()
+        {
+            loading = true;
+            c.Normalize(ramMb);
+            string[] methods = Config.Methods(c.Format);
+            if (methods.Length == 0 || c.Level == 0) ddMethod.SetItems(new[] { c.Level == 0 && methods.Length > 0 ? "None (store)" : "None" }, new[] { "" }, "");
+            else ddMethod.SetItems(methods, methods, c.Method);
+
+            string[] dicts = Config.Dicts(c.Method, ramMb);
+            ddDict.SetItems(c.Method == "Deflate" ? new[] { "32 KB" } : c.Method == "Deflate64" ? new[] { "64 KB" } : Array.ConvertAll(dicts, Config.SizeName), dicts, c.Dict);
+            string[] words = Config.Words(c.Method);
+            ddWord.SetItems(Array.ConvertAll(words, delegate(string s) { return s == "" ? "Auto" : s; }), words, c.Word);
+
+            if (c.Format == "zip") ddEncryption.SetItems(new[] { "AES-256", "ZipCrypto (weak)" }, new[] { "", "ZipCrypto" }, c.Encryption);
+            else ddEncryption.SetItems(new[] { c.Format == "7z" ? "AES-256" : "Not available" }, new[] { "" }, "");
+
+            ddLevel.Enabled = c.Format != "tar";
+            ddSolid.Enabled = c.Format == "7z";
+            ddVolume.Enabled = !(c.Format == "7z" && c.Sfx);
+            txtPassword.Enabled = togShow.Enabled = c.Format != "tar";
+            ddEncryption.Enabled = c.Format == "zip" && c.Password != "";
+            togNames.Enabled = c.Format == "7z" && c.Password != "";
+            togSfx.Enabled = c.Format == "7z" && sfxAvailable;
+            if (togSfx.Checked != c.Sfx) togSfx.Checked = c.Sfx;
+            if (togNames.Checked != c.EncryptNames) togNames.Checked = c.EncryptNames;
+            txtPassword.Box.UseSystemPasswordChar = !togShow.Checked;
+
+            lblPreview.Text = c.Preview();
+            tips.SetToolTip(lblPreview, c.Preview());
+            loading = false;
+        }
+
+        void Accept()
+        {
+            Read();
+            string problem = Config.Check(c.Extra);
+            if (problem == null && c.Password.Contains("\"")) problem = "The password can't contain a double quote (\"), because 7-Zip's command line cannot carry one.";
+            if (problem != null)
+            {
+                MessageBox.Show(this, problem, Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            c.Normalize(ramMb);
+            Result = c;
+            DialogResult = DialogResult.OK;
+        }
+    }
+
     // The queue: one card per item, with sizes, the prediction, progress and the verification result.
     class QueueView : Panel
     {
@@ -783,7 +1466,7 @@ namespace Squish
         const int Pieces = 32, PieceSize = 2 << 20;
 
         // Returns archive size / original size, or -1 if it could not be measured.
-        public static double Ratio(string sevenZip, List<FileEntry> files, int mx, int dictMb, Action<Process> started, Func<bool> stop)
+        public static double Ratio(string sevenZip, List<FileEntry> files, string switches, string extension, Action<Process> started, Func<bool> stop)
         {
             var starts = new long[files.Count];
             long total = 0;
@@ -824,9 +1507,8 @@ namespace Squish
                 }
                 if (fed == 0 || stop()) return fed == 0 ? 0 : -1;
 
-                string archive = Path.Combine(tmp, "sample.7z");
-                var psi = new ProcessStartInfo(sevenZip, "a -t7z -mx=" + mx + (dictMb > 0 ? " -md=" + dictMb + "m" : "") +
-                                                         " -bso0 -bse0 -bsp0 -y -- \"" + archive + "\" \"" + dir + "\\*\"")
+                string archive = Path.Combine(tmp, "sample" + extension);
+                var psi = new ProcessStartInfo(sevenZip, "a " + switches + " -bso0 -bse0 -bsp0 -y \"" + archive + "\" \"" + dir + "\\*\"")
                 {
                     UseShellExecute = false, CreateNoWindow = true
                 };
@@ -903,6 +1585,10 @@ namespace Squish
         QueueView queue;
         Segmented segLevel, segDict, segOut;
         Toggle togLowPrio, togCombine;
+        FlatButton btnAdvanced;
+        Label lblDictHint;
+        Config adv = new Config();      // what the Advanced dialog last set
+        long ramMb;
         FlatButton btnBrowse, btnClear, btnTheme, btnStart, btnPause, btnCancel;
         Meter meter;
         Label lblLevelHint, lblOut, lblSummary, lblStatus, lblFile;
@@ -969,13 +1655,7 @@ namespace Squish
             foreach (Control child in c.Controls) ClearLabelBackgrounds(child);
         }
 
-        // Title bar in the same mode, tinted to match the top of the window where Windows allows it.
-        void ApplyTitleBar()
-        {
-            int dark = Theme.Dark ? 1 : 0, caption = Theme.BgTop.R | Theme.BgTop.G << 8 | Theme.BgTop.B << 16;
-            Native.DwmSetWindowAttribute(Handle, 20, ref dark, 4);
-            Native.DwmSetWindowAttribute(Handle, 35, ref caption, 4);
-        }
+        void ApplyTitleBar() { Theme.StyleTitleBar(Handle); }
 
         void ToggleTheme()
         {
@@ -1096,6 +1776,7 @@ namespace Squish
             long ramKb;
             if (!Native.GetPhysicallyInstalledSystemMemory(out ramKb) || ramKb <= 0) ramKb = 8L * 1024 * 1024;
             var dictNames = new List<string>();
+            ramMb = ramKb / 1024;
             foreach (int mb in new[] { 0, 64, 128, 256, 512, 1024 })
             {
                 // LZMA2 needs roughly 11x the dictionary in RAM while compressing.
@@ -1123,7 +1804,8 @@ namespace Squish
             opts.Controls.Add(lblLevelHint, 2, 0);
             opts.Controls.Add(NewLabel("Dictionary"), 0, 1);
             opts.Controls.Add(segDict, 1, 1);
-            opts.Controls.Add(NewHint("Bigger can shrink more, but needs far more RAM."), 2, 1);
+            lblDictHint = NewHint("");
+            opts.Controls.Add(lblDictHint, 2, 1);
             opts.Controls.Add(NewLabel("Save to"), 0, 2);
             opts.Controls.Add(segOut, 1, 2);
             opts.Controls.Add(outRow, 2, 2);
@@ -1132,7 +1814,7 @@ namespace Squish
             toggles.Margin = new Padding(0, S(6), 0, 0);
             var verified = new Label
             {
-                Text = "\u2714  Verified lossless with SHA-256, at every level",
+                Text = "\u2714  Verified lossless with SHA-256, always",
                 AutoSize = true, ForeColor = Theme.Good, Anchor = AnchorStyles.Left, Margin = new Padding(0, S(3), S(24), 0)
             };
             togLowPrio = new Toggle { Text = "Keep PC responsive", Margin = new Padding(0) };
@@ -1140,7 +1822,12 @@ namespace Squish
             tips.SetToolTip(togLowPrio, "7-Zip runs at low priority and gives way to other programs.");
             togCombine = new Toggle { Text = "All in one archive", Margin = new Padding(0, 0, S(24), 0) };
             tips.SetToolTip(togCombine, "On: everything in the queue is packed into a single .7z, which you name when you press Start.\r\nOff: each item becomes its own archive.");
-            toggles.Controls.AddRange(new Control[] { verified, togCombine, togLowPrio });
+            togLowPrio.Margin = new Padding(0, 0, S(24), 0);
+            btnAdvanced = NewButton("Advanced...", delegate { AdvancedClick(); });
+            btnAdvanced.Margin = new Padding(0);
+            btnAdvanced.Height = S(30);
+            tips.SetToolTip(btnAdvanced, "Everything 7-Zip offers: format, method, word size, solid blocks, threads,\r\nvolumes, password and raw switches. The lossless check still always runs.");
+            toggles.Controls.AddRange(new Control[] { verified, togCombine, togLowPrio, btnAdvanced });
             opts.Controls.Add(toggles, 0, 3);
             opts.SetColumnSpan(toggles, 3);
             card.Controls.Add(opts);
@@ -1255,11 +1942,13 @@ namespace Squish
             btnPause.Text = paused ? "Resume" : "Pause";
             btnCancel.Enabled = running && !cancel;
             btnClear.Enabled = jobs.Count > 0;
-            segLevel.Enabled = segDict.Enabled = segOut.Enabled = togLowPrio.Enabled = togCombine.Enabled = !running;
+            segLevel.Enabled = segDict.Enabled = !running && !adv.Custom;
+            segOut.Enabled = togLowPrio.Enabled = togCombine.Enabled = btnAdvanced.Enabled = !running;
             btnBrowse.Visible = segOut.SelectedIndex == 1;
             btnBrowse.Enabled = !running;
             lblOut.Text = segOut.SelectedIndex == 1 ? outDir : "Each archive is saved beside its original.";
-            lblLevelHint.Text = LevelHints[segLevel.SelectedIndex];
+            lblLevelHint.Text = adv.Custom ? "Advanced: " + adv.Describe() : LevelHints[segLevel.SelectedIndex];
+            lblDictHint.Text = adv.Custom ? "Change these in Advanced, or go back to simple there." : "Bigger can shrink more, but needs far more RAM.";
             UpdateSummary();
         }
 
@@ -1357,10 +2046,13 @@ namespace Squish
         {
             if (j.State != JobState.Done) return;
             if (j.Archive == null || !File.Exists(j.Archive)) { ArchiveGone(j); return; }
-            string msg = "Delete this archive?\r\n\r\n" + j.Archive + "\r\n" + Fmt(new FileInfo(j.Archive).Length) +
+            List<string> parts = (j.Parts ?? new List<string> { j.Archive }).FindAll(File.Exists);
+            long size = 0;
+            foreach (string p in parts) size += new FileInfo(p).Length;
+            string msg = "Delete this archive?\r\n\r\n" + j.Archive + (parts.Count > 1 ? "\r\nand its " + (parts.Count - 1) + " other volume" + (parts.Count > 2 ? "s" : "") : "") + "\r\n" + Fmt(size) +
                          "\r\n\r\nIt goes to the Recycle Bin (drives without one delete it permanently).\r\nYour original files are not touched.";
             if (MessageBox.Show(this, msg, AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
-            try { FileSystem.DeleteFile(j.Archive, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin); }
+            try { foreach (string p in parts) FileSystem.DeleteFile(p, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin); }
             catch (OperationCanceledException) { return; }
             catch (Exception ex)
             {
@@ -1394,6 +2086,28 @@ namespace Squish
         }
 
         // ------------------------------------------------------------ Actions
+
+        // The recipe in effect: the Advanced one, or one built from the two simple controls.
+        Config Current()
+        {
+            if (adv.Custom) return adv;
+            int mb = dictChoices[segDict.SelectedIndex];
+            return new Config { Level = LevelMx[segLevel.SelectedIndex], Dict = mb > 0 ? mb + "m" : "" };
+        }
+
+        // Self-extracting archives need 7-Zip's 7z.sfx module next to 7z.exe.
+        bool SfxAvailable { get { return sevenZip != null && File.Exists(Path.Combine(Path.GetDirectoryName(sevenZip), "7z.sfx")); } }
+
+        void AdvancedClick()
+        {
+            using (var d = new AdvancedForm(Current(), ramMb, SfxAvailable))
+            {
+                if (d.ShowDialog(this) != DialogResult.OK) return;
+                adv = d.Result;
+            }
+            LevelChanged();
+            SaveSettings();
+        }
 
         void LevelChanged()
         {
@@ -1460,11 +2174,16 @@ namespace Squish
             if (running) return;
             if ((sevenZip == null || !File.Exists(sevenZip)) && !Locate7z()) return;
 
+            Config recipe = Current();
+            if (recipe.Sfx && !SfxAvailable)
+            {
+                MessageBox.Show(this, "A self-extracting archive needs 7-Zip's 7z.sfx file next to 7z.exe, and it is missing. Turn that option off in Advanced.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
             var o = new Options
             {
-                Mx = LevelMx[segLevel.SelectedIndex],
-                DictMb = dictChoices[segDict.SelectedIndex],
-                LowPriority = togLowPrio.Checked
+                Pack = recipe.Core(), Finish = recipe.Finish(), Secret = recipe.Secret(), Filters = recipe.Filters(),
+                Extension = recipe.Extension(), Summary = recipe.Describe(), LowPriority = togLowPrio.Checked
             };
             if (segOut.SelectedIndex == 1)
             {
@@ -1502,13 +2221,14 @@ namespace Squish
             string target;
             using (var d = new SaveFileDialog
             {
-                Title = "Save " + waiting.Count + " items as one archive", Filter = "7z archive|*.7z", DefaultExt = "7z", AddExtension = true,
-                InitialDirectory = o.OutDir ?? parent, FileName = (string.IsNullOrEmpty(name) ? "Archive" : name) + ".7z", OverwritePrompt = true
+                Title = "Save " + waiting.Count + " items as one archive", Filter = "Archive|*" + o.Extension, DefaultExt = o.Extension.Substring(1), AddExtension = true,
+                InitialDirectory = o.OutDir ?? parent, FileName = (string.IsNullOrEmpty(name) ? "Archive" : name) + o.Extension, OverwritePrompt = true
             })
             {
                 if (d.ShowDialog(this) != DialogResult.OK) return false;
                 target = d.FileName;
             }
+            if (!target.EndsWith(o.Extension, StringComparison.OrdinalIgnoreCase)) target += o.Extension;
             if (waiting.Exists(delegate(Job j) { return j.IsDir && target.StartsWith(j.Source + "\\", StringComparison.OrdinalIgnoreCase); }))
             {
                 MessageBox.Show(this, "The archive can't be saved inside one of the folders being compressed. Pick another place.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -1599,7 +2319,7 @@ namespace Squish
                         var files = new List<FileEntry>();
                         if (job.IsDir) Walk(job.Source, files);
                         else files.Add(new FileEntry { Path = job.Source, Size = new FileInfo(job.Source).Length });
-                        ratio = Estimator.Ratio(sevenZip, files, (int)next[1], (int)next[2],
+                        ratio = Estimator.Ratio(sevenZip, files, (string)next[1], (string)next[2],
                             delegate(Process p) { estProc = p; }, delegate { return gen != estGen; });
                     }
                     catch { }
@@ -1625,7 +2345,8 @@ namespace Squish
             if (job == null) return null;
             job.Estimating = true;
             queue.Invalidate();
-            return new object[] { job, LevelMx[segLevel.SelectedIndex], dictChoices[segDict.SelectedIndex], estGen };
+            Config recipe = Current();
+            return new object[] { job, recipe.Core(), "." + recipe.Format, estGen };
         }
 
 
@@ -1645,7 +2366,7 @@ namespace Squish
                 long packed = -1;
                 if (state == JobState.Done)
                 {
-                    try { packed = new FileInfo(job.Archive).Length; } catch { }
+                    try { packed = 0; foreach (string p in job.Parts) packed += new FileInfo(p).Length; } catch { packed = -1; }
                     ok++;
                     if (proven) verified++;
                     if (job.Size > 0 && packed >= 0) { before += job.Size; after += packed; }
@@ -1685,7 +2406,7 @@ namespace Squish
                 {
                     archive = job.Target;
                     Directory.CreateDirectory(Path.GetDirectoryName(archive));
-                    if (File.Exists(archive)) File.Delete(archive);     // replacing it was confirmed in the save dialog
+                    foreach (string old in Parts(archive)) File.Delete(old);    // replacing it was confirmed in the save dialog
                     listFile = Path.Combine(Path.GetTempPath(), "Squish-list-" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".txt");
                     File.WriteAllLines(listFile, job.Sources.ToArray(), new UTF8Encoding(false));
                     items = " -scsUTF-8 \"@" + listFile + "\"";
@@ -1695,8 +2416,8 @@ namespace Squish
                     string dir = o.OutDir ?? Path.GetDirectoryName(job.Source);
                     string name = job.IsDir ? job.Title : Path.GetFileNameWithoutExtension(job.Source);
                     Directory.CreateDirectory(dir);
-                    archive = Path.Combine(dir, name + ".7z");
-                    for (int n = 2; File.Exists(archive); n++) archive = Path.Combine(dir, name + " (" + n + ").7z");
+                    archive = Path.Combine(dir, name + o.Extension);
+                    for (int n = 2; Parts(archive).Count > 0; n++) archive = Path.Combine(dir, name + " (" + n + ")" + o.Extension);
                     if (job.IsDir && archive.StartsWith(job.Source + "\\", StringComparison.OrdinalIgnoreCase))
                     {
                         note = "the output folder is inside the folder being compressed";
@@ -1706,16 +2427,16 @@ namespace Squish
                 }
                 job.Archive = archive;
 
-                // Every level and dictionary size is lossless LZMA2, and every archive is proven so before it is kept:
+                // Every format, method and level offered is lossless, and every archive is proven so before it is kept:
                 // step 1 compresses, step 2 decompresses the archive and hashes each file, step 3 hashes the originals.
                 const string common = " -bsp1 -bse2 -sccUTF-8";
                 const string steps = " of 3";
                 string err;
-                int code = Run7z("a -t7z -mx=" + o.Mx + (o.DictMb > 0 ? " -md=" + o.DictMb + "m" : "") + " -bso0 -y" + common + " \"" + archive + "\"" + items,
+                int code = Run7z("a " + o.Pack + o.Finish + o.Secret + o.Filters + " -bso0 -y" + common + " \"" + archive + "\"" + items,
                                  job, "Step 1" + steps + "  \u00B7  Compressing", o, null, out err);
                 if (cancel || code >= 2)
                 {
-                    TryDelete(archive);
+                    DeleteParts(archive);
                     if (cancel) { state = JobState.Cancelled; return; }
                     note = Explain(code, err); detail = err;
                     return;
@@ -1723,7 +2444,7 @@ namespace Squish
                 if (code == 1)
                 {
                     // Some files could not be read, so the archive would be incomplete. An incomplete copy is never kept.
-                    TryDelete(archive);
+                    DeleteParts(archive);
                     note = "some files could not be read, so the archive was removed (double-click for details)";
                     detail = "Lossless check FAILED. 7-Zip could not read some files, so the archive would have been incomplete. " +
                              "It was removed and your original files were not touched.\r\n\r\n" +
@@ -1731,23 +2452,26 @@ namespace Squish
                     return;
                 }
 
+                List<string> parts = Parts(archive);
+                if (parts.Count == 0) { note = "7-Zip did not produce an archive"; detail = err; return; }
+
                 var packed = new Dictionary<string, string>();
-                code = Run7z("t -scrcSHA256 -bso1" + common + " -- \"" + archive + "\"", job, "Step 2" + steps + "  \u00B7  Decompressing and hashing the archive", o, packed, out err);
-                if (cancel) { TryDelete(archive); state = JobState.Cancelled; return; }
+                code = Run7z("t -scrcSHA256 -bso1" + common + o.Secret + " \"" + parts[0] + "\"", job, "Step 2" + steps + "  \u00B7  Decompressing and hashing the archive", o, packed, out err);
+                if (cancel) { DeleteParts(archive); state = JobState.Cancelled; return; }
                 if (code != 0 || !packed.ContainsKey("SHA256 for data"))
                 {
-                    TryDelete(archive);
+                    DeleteParts(archive);
                     note = "the archive did not pass 7-Zip's integrity test and was removed"; detail = err;
                     return;
                 }
 
                 var original = new Dictionary<string, string>();
-                code = Run7z("h -scrcSHA256 -bso1" + common + items, job, "Step 3" + steps + "  \u00B7  Hashing the originals to compare", o, original, out err);
-                if (cancel) { TryDelete(archive); state = JobState.Cancelled; return; }
+                code = Run7z("h -scrcSHA256 -bso1" + common + o.Filters + items, job, "Step 3" + steps + "  \u00B7  Hashing the originals to compare", o, original, out err);
+                if (cancel) { DeleteParts(archive); state = JobState.Cancelled; return; }
                 string difference = code != 0 ? "The original files could not all be read again.\r\n" + err : Compare(original, packed);
                 if (difference != null)
                 {
-                    TryDelete(archive);
+                    DeleteParts(archive);
                     note = "the archive does not match the originals and was removed (double-click for details)";
                     detail = "Lossless check FAILED. The archive was removed and your original files were not touched.\r\n\r\n" + difference +
                              "\r\n\r\nThis usually means files changed while they were being compressed (is a program still using or saving them?).";
@@ -1756,12 +2480,14 @@ namespace Squish
 
                 proven = true;
                 state = JobState.Done;
+                job.Parts = parts;
+                job.Archive = parts[0];
                 string files;
                 note = "Verified lossless  \u00B7  SHA-256 matches the originals" + (packed.TryGetValue("Files", out files) ? " (" + long.Parse(files).ToString("N0") + (files == "1" ? " file)" : " files)") : "");
                 detail = "VERIFIED LOSSLESS\r\n\r\n" +
                          "The archive was fully decompressed and every file hashed with SHA-256. The original files " +
                          "were then hashed the same way. Contents, file names, file and folder counts and total size are identical.\r\n\r\n" +
-                         Describe(packed) + "\r\n\r\nArchive: " + archive;
+                         Describe(packed) + "\r\n\r\nSettings: " + o.Summary + "\r\nArchive: " + parts[0] + (parts.Count > 1 ? "  (" + parts.Count + " volumes)" : "");
             }
             catch (Exception ex)
             {
@@ -1905,6 +2631,20 @@ namespace Squish
             return "7-Zip stopped with error code " + code;
         }
 
+        // An archive is one file, or name.001, name.002 and so on when it was split into volumes.
+        static List<string> Parts(string archive)
+        {
+            var parts = new List<string>();
+            if (File.Exists(archive)) parts.Add(archive);
+            for (int i = 1; File.Exists(archive + "." + i.ToString("D3")); i++) parts.Add(archive + "." + i.ToString("D3"));
+            return parts;
+        }
+
+        static void DeleteParts(string archive)
+        {
+            foreach (string p in Parts(archive)) TryDelete(p);
+        }
+
         static void TryDelete(string path)
         {
             for (int i = 0; i < 5; i++)
@@ -2019,6 +2759,7 @@ namespace Squish
             if (cfg.TryGetValue("outmode", out v) && v == "1" && Directory.Exists(outDir)) segOut.SelectedIndex = 1;
             togLowPrio.Checked = !cfg.TryGetValue("lowprio", out v) || v != "0";
             togCombine.Checked = cfg.TryGetValue("combine", out v) && v == "1";
+            adv = Config.FromSettings(cfg, ramMb);
         }
 
         void SaveSettings()
@@ -2034,6 +2775,9 @@ namespace Squish
                 "theme=" + (Theme.Dark ? "dark" : "light"),
                 "sevenzip=" + sevenZip
             };
+            var all = new List<string>(lines);
+            all.AddRange(adv.ToLines());    // never includes the password
+            lines = all.ToArray();
             // Settings travel with the app; if its folder is read-only they go to the user profile instead.
             try { File.WriteAllLines(PortableSettings, lines); return; } catch { }
             try
