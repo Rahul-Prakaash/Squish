@@ -16,14 +16,27 @@ Squish does the clicking for you. The actual compression is done by [7-Zip](http
 - **Light and dark themes.** Switch with the sun and moon button.
 - **Advanced settings for people who want them.** Format, method, dictionary size, password, split volumes and more.
 
+## Download
+
+The easiest way to get Squish is the ready-made portable version. You do not need to build anything.
+
+1. Download [Squish-Portable.zip](https://github.com/Rahul-Prakaash/Squish/releases/latest/download/Squish-Portable.zip) from the [Releases page](https://github.com/Rahul-Prakaash/Squish/releases).
+2. Unpack the zip anywhere, for example on your Desktop or a USB stick.
+3. Open the `Squish` folder and double-click `Squish.exe`.
+
+The portable version already contains 7-Zip's engine, so it works even on a PC where 7-Zip is not installed.
+
+The first time you run it, Windows may show a blue "Windows protected your PC" box. That appears for any app that has not been digitally signed by a company. Click **More info**, then **Run anyway**.
+
 ## Requirements
 
 - Windows 10 or Windows 11.
-- 7-Zip installed, or a copy of 7-Zip sitting next to the app (the portable build below includes one).
 
-Nothing else needs to be installed. The tools needed to build the app already come with Windows.
+That is all for the portable version. If you build Squish yourself (see below), you also need 7-Zip installed, or a copy of 7-Zip sitting next to the app.
 
-## Getting started
+## Building it yourself
+
+You only need this section if you want to change the code or would rather build the app from source. The tools needed already come with Windows.
 
 ### 1. Get the code
 
