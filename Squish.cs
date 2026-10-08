@@ -111,7 +111,6 @@ namespace Squish
         public static bool Dark;
         public static Color Bg, Card, Raised, Border, Text, Muted, Accent, Good, Warn, Bad;
         public static Color BgTop, BgBottom, Accent2;   // gradient ends
-        public static readonly Color Hot = Color.FromArgb(255, 146, 72), HotDeep = Color.FromArgb(236, 72, 84);
 
         static Theme() { SetDark(true); }
 
@@ -245,6 +244,56 @@ namespace Squish
                 b.WrapMode = WrapMode.TileFlipXY;
                 g.FillRectangle(b, c.ClientRectangle);
             }
+        }
+    }
+
+    // The Squish mark: an archive box pressed flat between two arrows, on a gradient that runs from
+    // the dark theme's violet and pink into the light theme's orange. make-icon.ps1 draws the same shape for the .ico.
+    class LogoMark : Control
+    {
+        public LogoMark()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Theme.PaintBackdrop(e.Graphics, this);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            float n = Math.Min(Width, Height) - 1;
+            var r = new RectangleF(0, 0, n, n);
+
+            using (GraphicsPath tile = Rounded(r, n * 0.26f))
+            using (var b = new LinearGradientBrush(r, Color.Empty, Color.Empty, 45f))
+            {
+                b.InterpolationColors = new ColorBlend
+                {
+                    Colors = new[] { Color.FromArgb(132, 92, 255), Color.FromArgb(226, 100, 244), Color.FromArgb(255, 156, 66) },
+                    Positions = new[] { 0f, 0.55f, 1f }
+                };
+                e.Graphics.FillPath(b, tile);
+            }
+            using (var pen = new Pen(Color.White, Math.Max(1.4f, n * 0.085f)) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+            {
+                e.Graphics.DrawLines(pen, new[] { new PointF(n * 0.36f, n * 0.20f), new PointF(n * 0.50f, n * 0.32f), new PointF(n * 0.64f, n * 0.20f) });
+                e.Graphics.DrawLines(pen, new[] { new PointF(n * 0.36f, n * 0.80f), new PointF(n * 0.50f, n * 0.68f), new PointF(n * 0.64f, n * 0.80f) });
+            }
+            using (GraphicsPath box = Rounded(new RectangleF(n * 0.17f, n * 0.41f, n * 0.66f, n * 0.18f), n * 0.07f))
+                e.Graphics.FillPath(Brushes.White, box);
+            using (var slot = new Pen(Color.FromArgb(150, 96, 240), n * 0.05f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                e.Graphics.DrawLine(slot, n * 0.43f, n * 0.50f, n * 0.57f, n * 0.50f);
+        }
+
+        static GraphicsPath Rounded(RectangleF r, float radius)
+        {
+            float d = radius * 2;
+            var p = new GraphicsPath();
+            p.AddArc(r.X, r.Y, d, d, 180, 90);
+            p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
         }
     }
 
@@ -618,11 +667,11 @@ namespace Squish
             double t = dragClock.Elapsed.TotalSeconds, fade = Math.Min(1, t / 0.18);
             int a = (int)(255 * fade);
             var r = new Rectangle(0, 0, ClientSize.Width, ClientSize.Height);
-            Theme.Fill(g, r, Theme.S(14), Color.FromArgb((int)(240 * fade), Theme.Mix(Theme.Bg, Theme.Hot, 0.10)));
+            Theme.Fill(g, r, Theme.S(14), Color.FromArgb((int)(240 * fade), Theme.Mix(Theme.Bg, Theme.Accent, 0.10)));
 
             // Marching dashed border
             using (GraphicsPath p = Theme.Round(Rectangle.Inflate(r, -Theme.S(1), -Theme.S(1)), Theme.S(14)))
-            using (var pen = new Pen(Color.FromArgb(a, Theme.Hot), Theme.S(2)) { DashPattern = new[] { 4f, 3f }, DashOffset = (float)(-t * 6) })
+            using (var pen = new Pen(Color.FromArgb(a, Theme.Accent), Theme.S(2)) { DashPattern = new[] { 4f, 3f }, DashOffset = (float)(-t * 6) })
                 g.DrawPath(pen, p);
 
             // Pulsing rings behind a bouncing drop icon
@@ -631,12 +680,12 @@ namespace Squish
             {
                 double ph = (t / 1.4 + k * 0.5) % 1.0;
                 int rad = disc + (int)(ph * Theme.S(56));
-                using (var pen = new Pen(Color.FromArgb((int)((1 - ph) * 120 * fade), Theme.Hot), Theme.S(2)))
+                using (var pen = new Pen(Color.FromArgb((int)((1 - ph) * 120 * fade), Theme.Accent), Theme.S(2)))
                     g.DrawEllipse(pen, cx - rad, cy - rad, rad * 2, rad * 2);
             }
             float scale = 1f + 0.06f * (float)Math.Sin(t * 5);
             int d = (int)(disc * scale);
-            using (var b = new LinearGradientBrush(new Rectangle(cx - d, cy - d, d * 2, d * 2), Color.FromArgb(a, Theme.Hot), Color.FromArgb(a, Theme.HotDeep), 60f))
+            using (var b = new LinearGradientBrush(new Rectangle(cx - d, cy - d, d * 2, d * 2), Color.FromArgb(a, Theme.Accent), Color.FromArgb(a, Theme.Accent2), 60f))
                 g.FillEllipse(b, cx - d, cy - d, d * 2, d * 2);
             int bounce = (int)(Math.Sin(t * 5) * Theme.S(4));
             TextRenderer.DrawText(g, "\uE896", Theme.IconBig, new Rectangle(cx - disc, cy - disc + bounce, disc * 2, disc * 2), Color.White, Theme.Line | TextFormatFlags.HorizontalCenter);
@@ -993,12 +1042,15 @@ namespace Squish
             Controls.Add(root);
 
             // Header
-            var header = NewTable(2, 1);
+            var header = NewTable(3, 1);
+            header.Dock = DockStyle.Fill;
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            header.Controls.Add(new LogoMark { Size = new Size(S(48), S(48)), Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, S(12), 0) }, 0, 0);
             var titles = NewTable(1, 2);
             titles.Controls.Add(new Label { Text = AppName, Font = Theme.Title, AutoSize = true, Margin = new Padding(0) }, 0, 0);
-            titles.Controls.Add(new Label { Text = "Lossless .7z archives, powered by 7-Zip. Works offline, nothing to install.", ForeColor = Theme.Muted, AutoSize = true, Margin = new Padding(S(2), 0, 0, 0) }, 0, 1);
+            titles.Controls.Add(new Label { Text = "Lossless .7z archives. Works offline, nothing to install.", ForeColor = Theme.Muted, AutoSize = true, Margin = new Padding(S(2), 0, 0, 0) }, 0, 1);
             var adders = NewFlow();
             adders.Anchor = AnchorStyles.Right;
             btnClear = NewButton("Clear", delegate { RemoveWhere(delegate(Job j) { return true; }); });
@@ -1013,8 +1065,8 @@ namespace Squish
                 btnTheme
             });
             UpdateThemeButton();
-            header.Controls.Add(titles, 0, 0);
-            header.Controls.Add(adders, 1, 0);
+            header.Controls.Add(titles, 1, 0);
+            header.Controls.Add(adders, 2, 0);
             root.Controls.Add(header, 0, 0);
 
             // Queue
