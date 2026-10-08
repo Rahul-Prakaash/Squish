@@ -77,7 +77,7 @@ namespace GameCompressor
         public static readonly Color Good = Color.FromArgb(78, 203, 131);
         public static readonly Color Warn = Color.FromArgb(229, 170, 66);
         public static readonly Color Bad = Color.FromArgb(244, 104, 104);
-
+        public static readonly Color Hot = Color.FromArgb(255, 146, 72), HotDeep = Color.FromArgb(236, 72, 84);
         public const TextFormatFlags Line = TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis;
 
         public static float Scale = 1;
@@ -349,12 +349,40 @@ namespace GameCompressor
         readonly ToolTip tip = new ToolTip();
         int hoverRow = -1, hoverBtn = -1;
 
+        // Drag-and-drop feedback: an animated overlay while files are held over the window.
+        readonly System.Windows.Forms.Timer anim = new System.Windows.Forms.Timer { Interval = 16 };
+        readonly Stopwatch dragClock = new Stopwatch(), leftClock = new Stopwatch();
+        bool dragging, dragLeft;
+        string dragText = "";
+
         public QueueView()
         {
             DoubleBuffered = true;
             ResizeRedraw = true;
             AutoScroll = true;
             BackColor = Theme.Bg;
+            // Moving between controls fires Leave then Enter, so only end the overlay once the drag has really left.
+            anim.Tick += delegate { if (dragLeft && leftClock.ElapsedMilliseconds > 120) EndDrag(); else Invalidate(); };
+        }
+
+        public void DragHover(string text)
+        {
+            dragLeft = false;
+            if (text != null) dragText = text;
+            if (dragging) return;
+            dragging = true;
+            dragClock.Restart();
+            anim.Start();
+            Invalidate();
+        }
+
+        public void DragAway() { dragLeft = true; leftClock.Restart(); }
+
+        public void EndDrag()
+        {
+            dragging = dragLeft = false;
+            anim.Stop();
+            Invalidate();
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -427,12 +455,45 @@ namespace GameCompressor
         {
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            if (Jobs.Count == 0) { PaintEmpty(g); return; }
+            if (Jobs.Count == 0 && !dragging) PaintEmpty(g);
             for (int i = 0; i < Jobs.Count; i++)
             {
                 Rectangle r = RowRect(i);
                 if (r.Bottom >= 0 && r.Top <= Height) PaintRow(g, r, Jobs[i], i == hoverRow);
             }
+            if (dragging) PaintDrop(g);
+        }
+
+        void PaintDrop(Graphics g)
+        {
+            double t = dragClock.Elapsed.TotalSeconds, fade = Math.Min(1, t / 0.18);
+            int a = (int)(255 * fade);
+            var r = new Rectangle(0, 0, ClientSize.Width, ClientSize.Height);
+            Theme.Fill(g, r, Theme.S(14), Color.FromArgb((int)(240 * fade), Theme.Mix(Theme.Bg, Theme.Hot, 0.10)));
+
+            // Marching dashed border
+            using (GraphicsPath p = Theme.Round(Rectangle.Inflate(r, -Theme.S(1), -Theme.S(1)), Theme.S(14)))
+            using (var pen = new Pen(Color.FromArgb(a, Theme.Hot), Theme.S(2)) { DashPattern = new[] { 4f, 3f }, DashOffset = (float)(-t * 6) })
+                g.DrawPath(pen, p);
+
+            // Pulsing rings behind a bouncing drop icon
+            int cx = r.Width / 2, cy = r.Height / 2 - Theme.S(34), disc = Theme.S(40);
+            for (int k = 0; k < 2; k++)
+            {
+                double ph = (t / 1.4 + k * 0.5) % 1.0;
+                int rad = disc + (int)(ph * Theme.S(56));
+                using (var pen = new Pen(Color.FromArgb((int)((1 - ph) * 120 * fade), Theme.Hot), Theme.S(2)))
+                    g.DrawEllipse(pen, cx - rad, cy - rad, rad * 2, rad * 2);
+            }
+            float scale = 1f + 0.06f * (float)Math.Sin(t * 5);
+            int d = (int)(disc * scale);
+            using (var b = new LinearGradientBrush(new Rectangle(cx - d, cy - d, d * 2, d * 2), Color.FromArgb(a, Theme.Hot), Color.FromArgb(a, Theme.HotDeep), 60f))
+                g.FillEllipse(b, cx - d, cy - d, d * 2, d * 2);
+            int bounce = (int)(Math.Sin(t * 5) * Theme.S(4));
+            TextRenderer.DrawText(g, "\uE896", Theme.IconBig, new Rectangle(cx - disc, cy - disc + bounce, disc * 2, disc * 2), Color.White, Theme.Line | TextFormatFlags.HorizontalCenter);
+
+            TextRenderer.DrawText(g, "Drop it like it's hot", Theme.Title, new Rectangle(0, cy + disc + Theme.S(22), r.Width, Theme.S(38)), Theme.Text, Theme.Line | TextFormatFlags.HorizontalCenter);
+            TextRenderer.DrawText(g, dragText, Theme.Font, new Rectangle(0, cy + disc + Theme.S(60), r.Width, Theme.S(22)), Theme.Muted, Theme.Line | TextFormatFlags.HorizontalCenter);
         }
 
         void PaintEmpty(Graphics g)
@@ -673,6 +734,7 @@ namespace GameCompressor
             StartPosition = FormStartPosition.CenterScreen;
 
             BuildUi();
+            HookDrop(this);
             Dictionary<string, string> cfg = LoadSettings();
             ApplySettings(cfg);
 
@@ -748,7 +810,7 @@ namespace GameCompressor
             root.Controls.Add(header, 0, 0);
 
             // Queue
-            queue = new QueueView { Jobs = jobs, Dock = DockStyle.Fill, Margin = new Padding(0, S(14), 0, S(12)), AllowDrop = true };
+            queue = new QueueView { Jobs = jobs, Dock = DockStyle.Fill, Margin = new Padding(0, S(14), 0, S(12)) };
             queue.ButtonClicked += delegate(Job j, int button)
             {
                 if (button == QueueView.BtnRemove) RemoveWhere(delegate(Job x) { return x == j; });
@@ -756,17 +818,6 @@ namespace GameCompressor
                 else ShowArchive(j);
             };
             queue.Activated += RowActivated;
-            DragEventHandler enter = delegate(object s, DragEventArgs e)
-            {
-                e.Effect = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
-            };
-            DragEventHandler drop = delegate(object s, DragEventArgs e)
-            {
-                AddPaths(e.Data.GetData(DataFormats.FileDrop) as string[]);
-            };
-            AllowDrop = true;
-            queue.DragEnter += enter; queue.DragDrop += drop;
-            DragEnter += enter; DragDrop += drop;
             root.Controls.Add(queue, 0, 1);
 
             // Options
@@ -864,6 +915,41 @@ namespace GameCompressor
             bottom.Controls.Add(texts, 0, 0);
             bottom.Controls.Add(actions, 1, 0);
             root.Controls.Add(bottom, 0, 5);
+        }
+
+        // Files can be dropped anywhere on the window; the queue shows the drop overlay.
+        void HookDrop(Control c)
+        {
+            c.AllowDrop = true;
+            c.DragEnter += delegate(object s, DragEventArgs e)
+            {
+                var paths = e.Data.GetDataPresent(DataFormats.FileDrop) ? e.Data.GetData(DataFormats.FileDrop) as string[] : null;
+                e.Effect = paths != null ? DragDropEffects.Copy : DragDropEffects.None;
+                if (paths != null) queue.DragHover(DropText(paths));
+            };
+            c.DragOver += delegate(object s, DragEventArgs e)
+            {
+                bool files = e.Data.GetDataPresent(DataFormats.FileDrop);
+                e.Effect = files ? DragDropEffects.Copy : DragDropEffects.None;
+                if (files) queue.DragHover(null);
+            };
+            c.DragLeave += delegate { queue.DragAway(); };
+            c.DragDrop += delegate(object s, DragEventArgs e)
+            {
+                queue.EndDrag();
+                AddPaths(e.Data.GetData(DataFormats.FileDrop) as string[]);
+            };
+            foreach (Control child in c.Controls) HookDrop(child);
+        }
+
+        static string DropText(string[] paths)
+        {
+            int dirs = 0, files = 0;
+            foreach (string p in paths) { if (Directory.Exists(p)) dirs++; else files++; }
+            var parts = new List<string>();
+            if (dirs > 0) parts.Add(dirs + (dirs == 1 ? " folder" : " folders"));
+            if (files > 0) parts.Add(files + (files == 1 ? " file" : " files"));
+            return "Release to add " + string.Join(" and ", parts) + " to the queue";
         }
 
         static TableLayoutPanel NewTable(int columns, int rows)
