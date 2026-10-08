@@ -38,6 +38,9 @@ namespace Squish
     class Job
     {
         public string Source;
+        public List<string> Sources;    // set when several items are packed into one archive
+        public string Target;           // that archive's path, chosen by the user
+        public string Title { get { return Sources != null ? Path.GetFileNameWithoutExtension(Target) : Path.GetFileName(Source); } }
         public bool IsDir;
         public long Size = -1;      // -1 while the folder is still being measured
         public long Packed = -1;    // real archive size, once finished
@@ -649,9 +652,9 @@ namespace Squish
             int y = r.Height / 2 - Theme.S(70);
             TextRenderer.DrawText(g, "\uE8B7", Theme.IconBig, new Rectangle(0, y, r.Width, Theme.S(56)), Theme.Accent, Theme.Line | TextFormatFlags.HorizontalCenter);
             TextRenderer.DrawText(g, "Drop files or folders here", Theme.Title, new Rectangle(0, y + Theme.S(58), r.Width, Theme.S(38)), Theme.Text, Theme.Line | TextFormatFlags.HorizontalCenter);
-            TextRenderer.DrawText(g, "Each item becomes its own .7z archive, with the final size predicted before you start.",
+            TextRenderer.DrawText(g, "Each item becomes its own .7z, or turn on All in one archive to pack them together.",
                 Theme.Font, new Rectangle(0, y + Theme.S(98), r.Width, Theme.S(22)), Theme.Muted, Theme.Line | TextFormatFlags.HorizontalCenter);
-            TextRenderer.DrawText(g, "Lossless: every archive is checked against the original files with SHA-256.",
+            TextRenderer.DrawText(g, "The size is predicted before you start, and every archive is verified lossless.",
                 Theme.Font, new Rectangle(0, y + Theme.S(120), r.Width, Theme.S(22)), Theme.Muted, Theme.Line | TextFormatFlags.HorizontalCenter);
         }
 
@@ -661,7 +664,7 @@ namespace Squish
             Theme.Stroke(g, r, Theme.S(14), Theme.Mix(Theme.Card, Theme.Border, 0.55), false);
 
             Color accent = j.State == JobState.Done ? Theme.Good : j.State == JobState.Failed ? Theme.Bad : Theme.Accent;
-            TextRenderer.DrawText(g, j.IsDir ? "\uE8B7" : "\uE7C3", Theme.Icon, new Rectangle(r.X + Theme.S(12), r.Y, Theme.S(36), r.Height), accent, Theme.Line | TextFormatFlags.HorizontalCenter);
+            TextRenderer.DrawText(g, j.Sources != null ? "\uE7B8" : j.IsDir ? "\uE8B7" : "\uE7C3", Theme.Icon, new Rectangle(r.X + Theme.S(12), r.Y, Theme.S(36), r.Height), accent, Theme.Line | TextFormatFlags.HorizontalCenter);
 
             // Right side: size, predicted or real result
             string sizes, saved = ""; Color savedColor = Theme.Muted;
@@ -694,10 +697,10 @@ namespace Squish
                 case JobState.Done: status = j.Note; statusColor = j.Verified ? Theme.Good : Theme.Muted; break;
                 case JobState.Failed: status = "Failed: " + j.Note; statusColor = Theme.Bad; break;
                 case JobState.Cancelled: status = "Cancelled"; break;
-                default: status = j.Source; break;
+                default: status = j.Sources != null ? j.Sources.Count + " items" : j.Source; break;
             }
             int left = r.X + Theme.S(56), leftW = right - left - Theme.S(10);
-            TextRenderer.DrawText(g, Path.GetFileName(j.Source), Theme.Bold, new Rectangle(left, r.Y + Theme.S(10), leftW, Theme.S(24)), Theme.Text, Theme.Line);
+            TextRenderer.DrawText(g, j.Title, Theme.Bold, new Rectangle(left, r.Y + Theme.S(10), leftW, Theme.S(24)), Theme.Text, Theme.Line);
             TextRenderer.DrawText(g, status, Theme.Small, new Rectangle(left, r.Y + Theme.S(34), leftW, Theme.S(20)), statusColor,
                 j.State == JobState.Pending ? (Theme.Line & ~TextFormatFlags.EndEllipsis) | TextFormatFlags.PathEllipsis : Theme.Line);
 
@@ -850,7 +853,7 @@ namespace Squish
 
         QueueView queue;
         Segmented segLevel, segDict, segOut;
-        Toggle togLowPrio;
+        Toggle togLowPrio, togCombine;
         FlatButton btnBrowse, btnClear, btnTheme, btnStart, btnPause, btnCancel;
         Meter meter;
         Label lblLevelHint, lblOut, lblSummary, lblStatus, lblFile;
@@ -1068,7 +1071,7 @@ namespace Squish
             opts.Controls.Add(lblLevelHint, 2, 0);
             opts.Controls.Add(NewLabel("Dictionary"), 0, 1);
             opts.Controls.Add(segDict, 1, 1);
-            opts.Controls.Add(NewHint("Bigger can shrink large folders further, but needs far more RAM."), 2, 1);
+            opts.Controls.Add(NewHint("Bigger can shrink more, but needs far more RAM."), 2, 1);
             opts.Controls.Add(NewLabel("Save to"), 0, 2);
             opts.Controls.Add(segOut, 1, 2);
             opts.Controls.Add(outRow, 2, 2);
@@ -1077,13 +1080,15 @@ namespace Squish
             toggles.Margin = new Padding(0, S(6), 0, 0);
             var verified = new Label
             {
-                Text = "\u2714  Every archive is verified lossless with SHA-256 before it is kept, at every level",
-                AutoSize = true, ForeColor = Theme.Good, Anchor = AnchorStyles.Left, Margin = new Padding(0, S(3), S(26), 0)
+                Text = "\u2714  Verified lossless with SHA-256, at every level",
+                AutoSize = true, ForeColor = Theme.Good, Anchor = AnchorStyles.Left, Margin = new Padding(0, S(3), S(24), 0)
             };
             togLowPrio = new Toggle { Text = "Keep PC responsive", Margin = new Padding(0) };
             tips.SetToolTip(verified, "After compressing, the archive is fully decompressed and every file is hashed with SHA-256,\r\nthen compared with a fresh hash of the original files. If anything differs, or a file could not\r\nbe read, the archive is removed and the item is marked as failed. This cannot be turned off.");
             tips.SetToolTip(togLowPrio, "7-Zip runs at low priority and gives way to other programs.");
-            toggles.Controls.AddRange(new Control[] { verified, togLowPrio });
+            togCombine = new Toggle { Text = "All in one archive", Margin = new Padding(0, 0, S(24), 0) };
+            tips.SetToolTip(togCombine, "On: everything in the queue is packed into a single .7z, which you name when you press Start.\r\nOff: each item becomes its own archive.");
+            toggles.Controls.AddRange(new Control[] { verified, togCombine, togLowPrio });
             opts.Controls.Add(toggles, 0, 3);
             opts.SetColumnSpan(toggles, 3);
             card.Controls.Add(opts);
@@ -1198,7 +1203,7 @@ namespace Squish
             btnPause.Text = paused ? "Resume" : "Pause";
             btnCancel.Enabled = running && !cancel;
             btnClear.Enabled = jobs.Count > 0;
-            segLevel.Enabled = segDict.Enabled = segOut.Enabled = togLowPrio.Enabled = !running;
+            segLevel.Enabled = segDict.Enabled = segOut.Enabled = togLowPrio.Enabled = togCombine.Enabled = !running;
             btnBrowse.Visible = segOut.SelectedIndex == 1;
             btnBrowse.Enabled = !running;
             lblOut.Text = segOut.SelectedIndex == 1 ? outDir : "Each archive is saved beside its original.";
@@ -1281,10 +1286,10 @@ namespace Squish
                 string text = j.Detail.Length > 3000 ? j.Detail.Substring(0, 3000) + "\r\n..." : j.Detail;
                 if (j.State != JobState.Done || !hasArchive)
                 {
-                    MessageBox.Show(this, text, Path.GetFileName(j.Source), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageBox.Show(this, text, j.Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
-                if (MessageBox.Show(this, text + "\r\n\r\nShow the archive in Explorer?", Path.GetFileName(j.Source), MessageBoxButtons.YesNo, MessageBoxIcon.Information) != DialogResult.Yes) return;
+                if (MessageBox.Show(this, text + "\r\n\r\nShow the archive in Explorer?", j.Title, MessageBoxButtons.YesNo, MessageBoxIcon.Information) != DialogResult.Yes) return;
             }
             if (hasArchive) ShowArchive(j);
         }
@@ -1311,7 +1316,7 @@ namespace Squish
                 return;
             }
             ResetJob(j);
-            lblStatus.Text = "Archive deleted. " + Path.GetFileName(j.Source) + " is back in the queue if you want to compress it again.";
+            lblStatus.Text = "Archive deleted. Its contents are back in the queue if you want to compress them again.";
         }
 
         void ArchiveGone(Job j)
@@ -1320,8 +1325,16 @@ namespace Squish
             ResetJob(j);
         }
 
+        // An all-in-one archive that is deleted, cancelled or failed goes back to being separate items.
+        void Explode(Job j)
+        {
+            jobs.Remove(j);
+            AddPaths(j.Sources);
+        }
+
         void ResetJob(Job j)
         {
+            if (j.Sources != null) { Explode(j); estWake.Set(); return; }
             j.State = JobState.Pending; j.Archive = j.Note = j.Detail = null; j.Packed = -1; j.Verified = false;
             queue.Invalidate();
             UpdateUi();
@@ -1374,7 +1387,7 @@ namespace Squish
             foreach (Job j in jobs)
             {
                 if (j.State != JobState.Pending || j.Est < 0) continue;
-                string drive = Path.GetPathRoot(o.OutDir ?? j.Source);
+                string drive = Path.GetPathRoot(j.Target ?? o.OutDir ?? j.Source);
                 long sum;
                 need.TryGetValue(drive, out sum);
                 need[drive] = sum + j.Est;
@@ -1407,12 +1420,12 @@ namespace Squish
                 o.OutDir = Path.GetFullPath(outDir);
             }
 
-            foreach (Job j in jobs)
-                if (j.State == JobState.Failed || j.State == JobState.Cancelled)
-                {
-                    j.State = JobState.Pending; j.Note = j.Detail = j.Archive = null; j.Packed = -1;
-                }
-            if (!EnoughSpace(o)) { queue.Invalidate(); UpdateUi(); return; }
+            foreach (Job j in jobs.FindAll(delegate(Job x) { return x.State == JobState.Failed || x.State == JobState.Cancelled; }))
+            {
+                if (j.Sources != null) { Explode(j); continue; }
+                j.State = JobState.Pending; j.Note = j.Detail = j.Archive = null; j.Packed = -1;
+            }
+            if ((togCombine.Checked && !Combine(o)) || !EnoughSpace(o)) { queue.Invalidate(); UpdateUi(); return; }
 
             SaveSettings();
             cancel = false; paused = false; running = true; started = 0;
@@ -1423,6 +1436,47 @@ namespace Squish
             new Thread(delegate() { Work(o); }) { IsBackground = true }.Start();
             queue.Invalidate();
             UpdateUi();
+        }
+
+        // Replaces the waiting items with one job that packs them all into a single archive the user names.
+        bool Combine(Options o)
+        {
+            List<Job> waiting = jobs.FindAll(delegate(Job j) { return j.State == JobState.Pending; });
+            if (waiting.Count < 2) return true;     // a single item is just a normal archive
+
+            string parent = Path.GetDirectoryName(waiting[0].Source);
+            bool together = waiting.TrueForAll(delegate(Job j) { return string.Equals(Path.GetDirectoryName(j.Source), parent, StringComparison.OrdinalIgnoreCase); });
+            string name = together ? Path.GetFileName(parent) : "";
+            string target;
+            using (var d = new SaveFileDialog
+            {
+                Title = "Save " + waiting.Count + " items as one archive", Filter = "7z archive|*.7z", DefaultExt = "7z", AddExtension = true,
+                InitialDirectory = o.OutDir ?? parent, FileName = (string.IsNullOrEmpty(name) ? "Archive" : name) + ".7z", OverwritePrompt = true
+            })
+            {
+                if (d.ShowDialog(this) != DialogResult.OK) return false;
+                target = d.FileName;
+            }
+            if (waiting.Exists(delegate(Job j) { return j.IsDir && target.StartsWith(j.Source + "\\", StringComparison.OrdinalIgnoreCase); }))
+            {
+                MessageBox.Show(this, "The archive can't be saved inside one of the folders being compressed. Pick another place.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return false;
+            }
+
+            var all = new Job { Source = target, Target = target, IsDir = true, Sources = waiting.ConvertAll(delegate(Job j) { return j.Source; }) };
+            if (waiting.TrueForAll(delegate(Job j) { return j.Size >= 0; })) { all.Size = 0; foreach (Job j in waiting) all.Size += j.Size; }
+            else ThreadPool.QueueUserWorkItem(delegate
+            {
+                long size = 0;
+                foreach (string p in all.Sources)
+                    try { size += Directory.Exists(p) ? Walk(p, null) : new FileInfo(p).Length; } catch { }
+                Ui(delegate { all.Size = size; queue.Invalidate(); UpdateSummary(); });
+            });
+            if (waiting.TrueForAll(delegate(Job j) { return j.Est >= 0; })) { all.Est = 0; foreach (Job j in waiting) all.Est += j.Est; }
+            jobs.RemoveAll(waiting.Contains);
+            jobs.Add(all);
+            queue.Relayout();
+            return true;
         }
 
         void PauseClick()
@@ -1515,7 +1569,7 @@ namespace Squish
         object[] NextEstimate()
         {
             if (running || sevenZip == null) return null;
-            Job job = jobs.Find(delegate(Job j) { return j.Size >= 0 && j.Packed < 0 && j.Est < 0 && !j.EstFailed && j.State != JobState.Working; });
+            Job job = jobs.Find(delegate(Job j) { return j.Sources == null && j.Size >= 0 && j.Packed < 0 && j.Est < 0 && !j.EstFailed && j.State != JobState.Working; });
             if (job == null) return null;
             job.Estimating = true;
             queue.Invalidate();
@@ -1570,27 +1624,42 @@ namespace Squish
         void ProcessJob(Job job, Options o, out JobState state, out string note, out string detail, out bool proven)
         {
             state = JobState.Failed; note = null; detail = null; proven = false;
+            string listFile = null;
             try
             {
-                string dir = o.OutDir ?? Path.GetDirectoryName(job.Source);
-                string name = job.IsDir ? Path.GetFileName(job.Source) : Path.GetFileNameWithoutExtension(job.Source);
-                Directory.CreateDirectory(dir);
-                string archive = Path.Combine(dir, name + ".7z");
-                for (int n = 2; File.Exists(archive); n++) archive = Path.Combine(dir, name + " (" + n + ").7z");
-                job.Archive = archive;
-
-                if (job.IsDir && archive.StartsWith(job.Source + "\\", StringComparison.OrdinalIgnoreCase))
+                // What 7-Zip packs: one path, or for an all-in-one archive a list file naming every item.
+                string archive, items;
+                if (job.Sources != null)
                 {
-                    note = "the output folder is inside the folder being compressed";
-                    return;
+                    archive = job.Target;
+                    Directory.CreateDirectory(Path.GetDirectoryName(archive));
+                    if (File.Exists(archive)) File.Delete(archive);     // replacing it was confirmed in the save dialog
+                    listFile = Path.Combine(Path.GetTempPath(), "Squish-list-" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".txt");
+                    File.WriteAllLines(listFile, job.Sources.ToArray(), new UTF8Encoding(false));
+                    items = " -scsUTF-8 \"@" + listFile + "\"";
                 }
+                else
+                {
+                    string dir = o.OutDir ?? Path.GetDirectoryName(job.Source);
+                    string name = job.IsDir ? job.Title : Path.GetFileNameWithoutExtension(job.Source);
+                    Directory.CreateDirectory(dir);
+                    archive = Path.Combine(dir, name + ".7z");
+                    for (int n = 2; File.Exists(archive); n++) archive = Path.Combine(dir, name + " (" + n + ").7z");
+                    if (job.IsDir && archive.StartsWith(job.Source + "\\", StringComparison.OrdinalIgnoreCase))
+                    {
+                        note = "the output folder is inside the folder being compressed";
+                        return;
+                    }
+                    items = " \"" + job.Source + "\"";
+                }
+                job.Archive = archive;
 
                 // Every level and dictionary size is lossless LZMA2, and every archive is proven so before it is kept:
                 // step 1 compresses, step 2 decompresses the archive and hashes each file, step 3 hashes the originals.
                 const string common = " -bsp1 -bse2 -sccUTF-8";
                 const string steps = " of 3";
                 string err;
-                int code = Run7z("a -t7z -mx=" + o.Mx + (o.DictMb > 0 ? " -md=" + o.DictMb + "m" : "") + " -bso0 -y" + common + " -- \"" + archive + "\" \"" + job.Source + "\"",
+                int code = Run7z("a -t7z -mx=" + o.Mx + (o.DictMb > 0 ? " -md=" + o.DictMb + "m" : "") + " -bso0 -y" + common + " \"" + archive + "\"" + items,
                                  job, "Step 1" + steps + "  \u00B7  Compressing", o, null, out err);
                 if (cancel || code >= 2)
                 {
@@ -1621,7 +1690,7 @@ namespace Squish
                 }
 
                 var original = new Dictionary<string, string>();
-                code = Run7z("h -scrcSHA256 -bso1" + common + " -- \"" + job.Source + "\"", job, "Step 3" + steps + "  \u00B7  Hashing the originals to compare", o, original, out err);
+                code = Run7z("h -scrcSHA256 -bso1" + common + items, job, "Step 3" + steps + "  \u00B7  Hashing the originals to compare", o, original, out err);
                 if (cancel) { TryDelete(archive); state = JobState.Cancelled; return; }
                 string difference = code != 0 ? "The original files could not all be read again.\r\n" + err : Compare(original, packed);
                 if (difference != null)
@@ -1645,6 +1714,10 @@ namespace Squish
             catch (Exception ex)
             {
                 note = ex.Message;
+            }
+            finally
+            {
+                if (listFile != null) try { File.Delete(listFile); } catch { }
             }
         }
 
@@ -1731,7 +1804,7 @@ namespace Squish
                 job.Pct = pct;
                 job.Note = phase + "  \u00B7  " + pct + "%";
                 queue.Invalidate();
-                string s = "Item " + started + " of " + total + "  \u00B7  " + Path.GetFileName(job.Source) + "  \u00B7  " + phase.Split('\u00B7')[0].Trim() + "  \u00B7  " + pct + "%  \u00B7  " + Clock(elapsed) + " elapsed";
+                string s = "Item " + started + " of " + total + "  \u00B7  " + job.Title + "  \u00B7  " + phase.Split('\u00B7')[0].Trim() + "  \u00B7  " + pct + "%  \u00B7  " + Clock(elapsed) + " elapsed";
                 if (pct >= 2 && pct < 100 && elapsed.TotalSeconds >= 10)
                     s += ", about " + Clock(TimeSpan.FromSeconds(elapsed.TotalSeconds * (100 - pct) / pct)) + " left";
                 lblStatus.Text = s;
@@ -1893,6 +1966,7 @@ namespace Squish
             segDict.SelectedIndex = cfg.TryGetValue("dict", out v) && int.TryParse(v, out n) ? dictChoices.IndexOf(n) : 0;
             if (cfg.TryGetValue("outmode", out v) && v == "1" && Directory.Exists(outDir)) segOut.SelectedIndex = 1;
             togLowPrio.Checked = !cfg.TryGetValue("lowprio", out v) || v != "0";
+            togCombine.Checked = cfg.TryGetValue("combine", out v) && v == "1";
         }
 
         void SaveSettings()
@@ -1904,6 +1978,7 @@ namespace Squish
                 "outmode=" + segOut.SelectedIndex,
                 "outdir=" + outDir,
                 "lowprio=" + (togLowPrio.Checked ? 1 : 0),
+                "combine=" + (togCombine.Checked ? 1 : 0),
                 "theme=" + (Theme.Dark ? "dark" : "light"),
                 "sevenzip=" + sevenZip
             };

@@ -11,6 +11,11 @@ Use
 Each item becomes its own .7z next to the original (or in a folder you
 choose). Your original files are never changed or deleted.
 
+All in one archive
+  Switch this on to pack everything in the queue into a single .7z. When you
+  press Start you are asked where to save it and what to call it. Deleting
+  that archive from the app puts its items back in the queue separately.
+
 Lossless, at every level
   Every compression level and dictionary size uses 7-Zip's lossless LZMA2,
   and every archive is proven before it is kept. This cannot be turned off:
