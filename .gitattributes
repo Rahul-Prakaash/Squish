@@ -1,0 +1,7 @@
+# Keep Windows line endings so build.bat works when the repository is downloaded as a ZIP
+*.bat -text
+*.cs -text
+*.ps1 -text
+*.txt -text
+*.ico binary
+*.ttf binary

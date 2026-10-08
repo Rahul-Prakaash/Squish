@@ -1,0 +1,6 @@
+# Build output
+*.exe
+Portable/
+
+# Settings written by the app
+*.ini
