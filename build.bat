@@ -1,6 +1,6 @@
 @echo off
-rem Builds GameCompressor.exe with the C# compiler that ships with Windows. Nothing to install.
-rem Then makes Portable\GameCompressor\ (the app plus 7-Zip's command-line engine) and a zip of it,
+rem Builds Squish.exe with the C# compiler that ships with Windows. Nothing to install.
+rem Then makes Portable\Squish\ (the app plus 7-Zip's command-line engine) and a zip of it,
 rem which runs on any Windows 10/11 PC, with or without 7-Zip installed.
 setlocal
 set HERE=%~dp0
@@ -11,12 +11,12 @@ if not exist "%CSC%" (
     pause
     exit /b 1
 )
-"%CSC%" /nologo /target:winexe /optimize+ /win32icon:"%HERE%app.ico" /r:Microsoft.VisualBasic.dll /out:"%HERE%GameCompressor.exe" "%HERE%GameCompressor.cs"
+"%CSC%" /nologo /target:winexe /optimize+ /win32icon:"%HERE%app.ico" /r:Microsoft.VisualBasic.dll /out:"%HERE%Squish.exe" "%HERE%Squish.cs"
 if errorlevel 1 (
     pause
     exit /b 1
 )
-echo Built GameCompressor.exe
+echo Built Squish.exe
 
 rem Find the installed 7-Zip to bundle its engine.
 set SZ=
@@ -27,13 +27,13 @@ if not defined SZ (
     exit /b 0
 )
 
-set OUT=%HERE%Portable\GameCompressor
+set OUT=%HERE%Portable\Squish
 if exist "%HERE%Portable" rd /s /q "%HERE%Portable"
 mkdir "%OUT%\7-Zip"
-copy /y "%HERE%GameCompressor.exe" "%OUT%\" >nul
+copy /y "%HERE%Squish.exe" "%OUT%\" >nul
 copy /y "%HERE%README.txt" "%OUT%\" >nul
 copy /y "%SZ%7z.exe" "%OUT%\7-Zip\" >nul
 copy /y "%SZ%7z.dll" "%OUT%\7-Zip\" >nul
 copy /y "%SZ%License.txt" "%OUT%\7-Zip\" >nul
-"%SZ%7z.exe" a -tzip -mx=9 -bso0 -bsp0 "%HERE%Portable\GameCompressor-Portable.zip" "%OUT%" >nul
-echo Made Portable\GameCompressor\ and Portable\GameCompressor-Portable.zip
+"%SZ%7z.exe" a -tzip -mx=9 -bso0 -bsp0 "%HERE%Portable\Squish-Portable.zip" "%OUT%" >nul
+echo Made Portable\Squish\ and Portable\Squish-Portable.zip

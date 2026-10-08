@@ -1,4 +1,4 @@
-// Game Compressor - a small offline front end for 7-Zip.
+// Squish - a small offline front end for 7-Zip.
 // Each folder (or file) in the queue becomes its own lossless .7z archive.
 // Build with build.bat (uses the C# compiler that ships with Windows, so C# 5 syntax only).
 
@@ -17,7 +17,7 @@ using System.Windows.Forms;
 using Microsoft.VisualBasic.FileIO;
 using Microsoft.Win32;
 
-namespace GameCompressor
+namespace Squish
 {
     static class Program
     {
@@ -537,8 +537,8 @@ namespace GameCompressor
             Theme.Stroke(g, r, Theme.S(14), Theme.Border, true);
             int y = r.Height / 2 - Theme.S(70);
             TextRenderer.DrawText(g, "\uE8B7", Theme.IconBig, new Rectangle(0, y, r.Width, Theme.S(56)), Theme.Accent, Theme.Line | TextFormatFlags.HorizontalCenter);
-            TextRenderer.DrawText(g, "Drop game folders here", Theme.Title, new Rectangle(0, y + Theme.S(58), r.Width, Theme.S(38)), Theme.Text, Theme.Line | TextFormatFlags.HorizontalCenter);
-            TextRenderer.DrawText(g, "Each folder becomes its own .7z archive, with the final size predicted before you start.",
+            TextRenderer.DrawText(g, "Drop files or folders here", Theme.Title, new Rectangle(0, y + Theme.S(58), r.Width, Theme.S(38)), Theme.Text, Theme.Line | TextFormatFlags.HorizontalCenter);
+            TextRenderer.DrawText(g, "Each item becomes its own .7z archive, with the final size predicted before you start.",
                 Theme.Font, new Rectangle(0, y + Theme.S(98), r.Width, Theme.S(22)), Theme.Muted, Theme.Line | TextFormatFlags.HorizontalCenter);
             TextRenderer.DrawText(g, "Lossless: every archive is checked against the original files with SHA-256.",
                 Theme.Font, new Rectangle(0, y + Theme.S(120), r.Width, Theme.S(22)), Theme.Muted, Theme.Line | TextFormatFlags.HorizontalCenter);
@@ -627,7 +627,7 @@ namespace GameCompressor
             if (total == 0) return 0;
             long wholeLimit = (long)Pieces * PieceSize;   // items this small are compressed in full
 
-            string tmp = Path.Combine(Path.GetTempPath(), "GameCompressor-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            string tmp = Path.Combine(Path.GetTempPath(), "Squish-" + Guid.NewGuid().ToString("N").Substring(0, 8));
             string dir = Path.Combine(tmp, "sample");
             Directory.CreateDirectory(dir);
             try
@@ -713,7 +713,7 @@ namespace GameCompressor
 
     class MainForm : Form
     {
-        const string AppName = "Game Compressor";
+        const string AppName = "Squish";
 
         static readonly string[] LevelNames = { "Fast", "Normal", "Maximum", "Ultra" };
         static readonly int[] LevelMx = { 3, 5, 7, 9 };
@@ -722,13 +722,13 @@ namespace GameCompressor
             "Quickest. Bigger archives.",
             "A good balance of speed and size.",
             "Smaller archives, noticeably slower.",
-            "Smallest archives. Can take hours on a big game."
+            "Smallest archives. Can take hours on very large folders."
         };
         static readonly Regex ProgressRx = new Regex(@"^\s*(\d{1,3})%(?:\s+\d+)?(?:\s+\S(?=\s))?\s*(.*)$", RegexOptions.Compiled);
         static readonly Regex InfoRx = new Regex(@"^(SHA256 for data and names|SHA256 for data|Files|Folders|Size):\s*(\S+)", RegexOptions.Compiled);
         static readonly string AppDir = AppDomain.CurrentDomain.BaseDirectory;
-        static readonly string PortableSettings = Path.Combine(AppDir, "GameCompressor.ini");
-        static readonly string UserSettings = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"GameCompressor\GameCompressor.ini");
+        static readonly string PortableSettings = Path.Combine(AppDir, "Squish.ini");
+        static readonly string UserSettings = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Squish\Squish.ini");
 
         readonly string[] startupPaths;
         readonly List<Job> jobs = new List<Job>();
@@ -840,7 +840,7 @@ namespace GameCompressor
             {
                 try
                 {
-                    foreach (string d in Directory.GetDirectories(Path.GetTempPath(), "GameCompressor-*"))
+                    foreach (string d in Directory.GetDirectories(Path.GetTempPath(), "Squish-*"))
                         if (Directory.GetLastWriteTimeUtc(d) < DateTime.UtcNow.AddMinutes(-10)) try { Directory.Delete(d, true); } catch { }
                 }
                 catch { }
@@ -878,7 +878,7 @@ namespace GameCompressor
             btnTheme.Size = new Size(S(40), S(34));
             adders.Controls.AddRange(new Control[]
             {
-                NewButton("Add Folder...", delegate { AddPaths(Shell.PickFolders(this, "Choose game folders to compress", true)); }),
+                NewButton("Add Folder...", delegate { AddPaths(Shell.PickFolders(this, "Choose folders to compress", true)); }),
                 NewButton("Add Files...", delegate { AddFilesClick(); }),
                 btnClear,
                 btnTheme
@@ -942,7 +942,7 @@ namespace GameCompressor
             opts.Controls.Add(lblLevelHint, 2, 0);
             opts.Controls.Add(NewLabel("Dictionary"), 0, 1);
             opts.Controls.Add(segDict, 1, 1);
-            opts.Controls.Add(NewHint("Bigger can shrink large games further, but needs much more RAM."), 2, 1);
+            opts.Controls.Add(NewHint("Bigger can shrink large folders further, but needs far more RAM."), 2, 1);
             opts.Controls.Add(NewLabel("Save to"), 0, 2);
             opts.Controls.Add(segOut, 1, 2);
             opts.Controls.Add(outRow, 2, 2);
@@ -966,7 +966,7 @@ namespace GameCompressor
             // Progress and actions
             lblSummary = new Label { Dock = DockStyle.Fill, AutoSize = false, Height = S(24), AutoEllipsis = true, UseMnemonic = false, Font = Theme.Bold, TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(0, S(12), 0, S(4)) };
             tips.SetToolTip(lblSummary, "Predicted by compressing an evenly spread sample of each item with the same settings.\r\n" +
-                                        "Usually within about 5% for game data. Folders of many similar small files often end up smaller than predicted.");
+                                        "Usually within about 5%. Folders of many similar small files often end up smaller than predicted.");
             root.Controls.Add(lblSummary, 0, 3);
             meter = new Meter { Dock = DockStyle.Fill, Height = S(8), Margin = new Padding(0, S(2), 0, S(8)) };
             root.Controls.Add(meter, 0, 4);
@@ -1075,7 +1075,7 @@ namespace GameCompressor
             segLevel.Enabled = segDict.Enabled = segOut.Enabled = togLowPrio.Enabled = !running;
             btnBrowse.Visible = segOut.SelectedIndex == 1;
             btnBrowse.Enabled = !running;
-            lblOut.Text = segOut.SelectedIndex == 1 ? outDir : "Each archive is saved beside the folder it came from.";
+            lblOut.Text = segOut.SelectedIndex == 1 ? outDir : "Each archive is saved beside its original.";
             lblLevelHint.Text = LevelHints[segLevel.SelectedIndex];
             UpdateSummary();
         }
@@ -1130,7 +1130,7 @@ namespace GameCompressor
             queue.Relayout();
             UpdateUi();
             if (wholeDrive)
-                MessageBox.Show(this, "A whole drive can't be added. Pick the game's folder instead.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(this, "A whole drive can't be added. Pick a folder inside it instead.", AppName, MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         void AddFilesClick()
@@ -1175,7 +1175,7 @@ namespace GameCompressor
             if (j.State != JobState.Done) return;
             if (j.Archive == null || !File.Exists(j.Archive)) { ArchiveGone(j); return; }
             string msg = "Delete this archive?\r\n\r\n" + j.Archive + "\r\n" + Fmt(new FileInfo(j.Archive).Length) +
-                         "\r\n\r\nIt goes to the Recycle Bin (drives without one delete it permanently).\r\nYour original game files are not touched.";
+                         "\r\n\r\nIt goes to the Recycle Bin (drives without one delete it permanently).\r\nYour original files are not touched.";
             if (MessageBox.Show(this, msg, AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
             try { FileSystem.DeleteFile(j.Archive, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin); }
             catch (OperationCanceledException) { return; }
@@ -1480,7 +1480,7 @@ namespace GameCompressor
                     note = "some files could not be read, so the archive was removed (double-click for details)";
                     detail = "Lossless check FAILED. 7-Zip could not read some files, so the archive would have been incomplete. " +
                              "It was removed and your original files were not touched.\r\n\r\n" +
-                             "Close the game or its launcher (they can lock files) and try again.\r\n\r\n" + err;
+                             "Close any program that may be using these files and try again.\r\n\r\n" + err;
                     return;
                 }
 
@@ -1503,7 +1503,7 @@ namespace GameCompressor
                     TryDelete(archive);
                     note = "the archive does not match the originals and was removed (double-click for details)";
                     detail = "Lossless check FAILED. The archive was removed and your original files were not touched.\r\n\r\n" + difference +
-                             "\r\n\r\nThis usually means files changed while they were being compressed (is the game or a launcher running?).";
+                             "\r\n\r\nThis usually means files changed while they were being compressed (is a program still using or saving them?).";
                     return;
                 }
 
