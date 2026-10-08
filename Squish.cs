@@ -7,8 +7,10 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Text;
 using System.IO;
 using System.Media;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -65,28 +67,70 @@ namespace Squish
 
     // ------------------------------------------------------------------ Look
 
+    // The typeface (Jost, SIL Open Font License) is compiled into the exe, so nothing is installed or downloaded.
+    static class Fonts
+    {
+        static readonly PrivateFontCollection embedded = new PrivateFontCollection();
+
+        public static void Load()
+        {
+            Assembly asm = Assembly.GetExecutingAssembly();
+            foreach (string name in asm.GetManifestResourceNames())
+            {
+                if (!name.EndsWith(".ttf", StringComparison.OrdinalIgnoreCase)) continue;
+                try
+                {
+                    using (Stream s = asm.GetManifestResourceStream(name))
+                    {
+                        var data = new byte[s.Length];
+                        for (int got = 0, n; got < data.Length && (n = s.Read(data, got, data.Length - got)) > 0; got += n) { }
+                        // Both GDI+ and plain GDI text drawing need the font, and the memory must outlive them.
+                        IntPtr mem = Marshal.AllocCoTaskMem(data.Length);
+                        Marshal.Copy(data, 0, mem, data.Length);
+                        embedded.AddMemoryFont(mem, data.Length);
+                        uint count = 0;
+                        Native.AddFontMemResourceEx(mem, (uint)data.Length, IntPtr.Zero, ref count);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        public static Font Get(string family, float size)
+        {
+            foreach (FontFamily f in embedded.Families) if (f.Name == family) return new Font(f, size);
+            return new Font("Segoe UI", size - 0.75f);
+        }
+    }
+
     static class Theme
     {
         public static bool Dark;
         public static Color Bg, Card, Raised, Border, Text, Muted, Accent, Good, Warn, Bad;
+        public static Color BgTop, BgBottom, Accent2;   // gradient ends
         public static readonly Color Hot = Color.FromArgb(255, 146, 72), HotDeep = Color.FromArgb(236, 72, 84);
 
         static Theme() { SetDark(true); }
 
+        // Dark is a deep purple gradient with violet-to-pink accents; light is warm cream-to-peach with orange accents.
         public static void SetDark(bool dark)
         {
             Dark = dark;
             if (dark)
             {
-                Bg = Color.FromArgb(17, 19, 24); Card = Color.FromArgb(27, 30, 37); Raised = Color.FromArgb(39, 43, 53);
-                Border = Color.FromArgb(55, 60, 73); Text = Color.FromArgb(233, 236, 241); Muted = Color.FromArgb(146, 154, 170);
-                Accent = Color.FromArgb(92, 139, 255); Good = Color.FromArgb(78, 203, 131); Warn = Color.FromArgb(229, 170, 66); Bad = Color.FromArgb(244, 104, 104);
+                BgTop = Color.FromArgb(46, 21, 92); Bg = Color.FromArgb(26, 15, 54); BgBottom = Color.FromArgb(13, 9, 28);
+                Card = Color.FromArgb(40, 27, 78); Raised = Color.FromArgb(58, 41, 108); Border = Color.FromArgb(84, 64, 146);
+                Text = Color.FromArgb(245, 240, 255); Muted = Color.FromArgb(180, 168, 220);
+                Accent = Color.FromArgb(146, 100, 255); Accent2 = Color.FromArgb(222, 104, 250);
+                Good = Color.FromArgb(98, 228, 170); Warn = Color.FromArgb(255, 198, 110); Bad = Color.FromArgb(255, 128, 146);
             }
             else
             {
-                Bg = Color.FromArgb(243, 244, 247); Card = Color.FromArgb(255, 255, 255); Raised = Color.FromArgb(232, 235, 241);
-                Border = Color.FromArgb(210, 215, 224); Text = Color.FromArgb(24, 27, 34); Muted = Color.FromArgb(98, 106, 122);
-                Accent = Color.FromArgb(58, 106, 240); Good = Color.FromArgb(22, 145, 80); Warn = Color.FromArgb(190, 120, 10); Bad = Color.FromArgb(210, 58, 58);
+                BgTop = Color.FromArgb(255, 251, 244); Bg = Color.FromArgb(255, 243, 228); BgBottom = Color.FromArgb(255, 225, 194);
+                Card = Color.FromArgb(255, 255, 255); Raised = Color.FromArgb(253, 238, 221); Border = Color.FromArgb(242, 215, 188);
+                Text = Color.FromArgb(52, 34, 22); Muted = Color.FromArgb(142, 113, 93);
+                Accent = Color.FromArgb(240, 108, 28); Accent2 = Color.FromArgb(255, 164, 46);
+                Good = Color.FromArgb(22, 146, 80); Warn = Color.FromArgb(194, 118, 6); Bad = Color.FromArgb(212, 62, 62);
             }
         }
 
@@ -114,10 +158,11 @@ namespace Squish
         public static void Init(float scale)
         {
             Scale = scale;
-            Font = new Font("Segoe UI", 9.75f);
-            Bold = new Font("Segoe UI Semibold", 10.5f);
-            Small = new Font("Segoe UI", 9f);
-            Title = new Font("Segoe UI Semibold", 16f);
+            Fonts.Load();
+            Font = Fonts.Get("Jost*", 10.5f);
+            Bold = Fonts.Get("Jost* Medium", 11.25f);
+            Small = Fonts.Get("Jost*", 9.75f);
+            Title = Fonts.Get("Jost* Semi", 18f);
             Icon = new Font("Segoe MDL2 Assets", 15f);
             IconSmall = new Font("Segoe MDL2 Assets", 9f);
             IconBig = new Font("Segoe MDL2 Assets", 30f);
@@ -149,6 +194,14 @@ namespace Squish
             using (var b = new SolidBrush(c)) g.FillPath(b, p);
         }
 
+        // Left-to-right gradient fill, used for anything "selected" or primary.
+        public static void FillGradient(Graphics g, Rectangle r, int radius, Color from, Color to)
+        {
+            if (r.Width < 1 || r.Height < 1) return;
+            using (GraphicsPath p = Round(r, radius))
+            using (var b = new LinearGradientBrush(new Rectangle(r.X - 1, r.Y - 1, r.Width + 2, r.Height + 2), from, to, 0f)) g.FillPath(b, p);
+        }
+
         public static void Stroke(Graphics g, Rectangle r, int radius, Color c, bool dashed)
         {
             r.Width--; r.Height--;
@@ -160,7 +213,49 @@ namespace Squish
             }
         }
 
-        public static Color Behind(Control c) { return c.Parent != null ? c.Parent.BackColor : Bg; }
+        static bool OnCard(Control c)
+        {
+            for (Control p = c.Parent; p != null; p = p.Parent) if (p is CardPanel) return true;
+            return false;
+        }
+
+        // The flat colour closest to what is behind a control (for blending disabled states).
+        public static Color Behind(Control c) { return OnCard(c) ? Card : Bg; }
+
+        // Paints what is behind a control: the card colour inside a card, otherwise that control's
+        // slice of the window-wide background gradient, so the gradient runs unbroken under everything.
+        public static void PaintBackdrop(Graphics g, Control c)
+        {
+            Form f = c.FindForm();
+            if (OnCard(c) || f == null || !f.IsHandleCreated || !c.IsHandleCreated)
+            {
+                using (var b = new SolidBrush(Behind(c))) g.FillRectangle(b, c.ClientRectangle);
+                return;
+            }
+            Point origin = f.PointToClient(c.PointToScreen(Point.Empty));
+            Rectangle window = f.ClientRectangle;
+            window.Offset(-origin.X, -origin.Y);
+            if (window.Width < 1 || window.Height < 1) return;
+            using (var b = new LinearGradientBrush(window, BgTop, BgBottom, 62f))
+            {
+                b.InterpolationColors = new ColorBlend { Colors = new[] { BgTop, Bg, BgBottom }, Positions = new[] { 0f, 0.45f, 1f } };
+                b.WrapMode = WrapMode.TileFlipXY;
+                g.FillRectangle(b, c.ClientRectangle);
+            }
+        }
+    }
+
+    // Layout panels that let the window gradient show through.
+    class Table : TableLayoutPanel
+    {
+        public Table() { DoubleBuffered = true; }
+        protected override void OnPaintBackground(PaintEventArgs e) { Theme.PaintBackdrop(e.Graphics, this); }
+    }
+
+    class Flow : FlowLayoutPanel
+    {
+        public Flow() { DoubleBuffered = true; }
+        protected override void OnPaintBackground(PaintEventArgs e) { Theme.PaintBackdrop(e.Graphics, this); }
     }
 
     class FlatButton : Button
@@ -180,20 +275,27 @@ namespace Squish
         protected override void OnMouseUp(MouseEventArgs e) { down = false; Invalidate(); base.OnMouseUp(e); }
         protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
 
+        Color Shade(Color c, Color back)
+        {
+            if (!Enabled) return Theme.Mix(c, back, 0.65);
+            if (down) return Theme.Mix(c, Color.Black, 0.18);
+            return hover ? Theme.Mix(c, Primary ? Color.White : Theme.Text, Primary ? 0.14 : 0.08) : c;
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
             Color back = Theme.Behind(this);
-            g.Clear(back);
+            Theme.PaintBackdrop(g, this);
             g.SmoothingMode = SmoothingMode.AntiAlias;
 
-            Color fill = Primary ? Theme.Accent : Theme.Raised;
-            if (!Enabled) fill = Theme.Mix(fill, back, 0.65);
-            else if (down) fill = Theme.Mix(fill, Color.Black, 0.18);
-            else if (hover) fill = Theme.Mix(fill, Theme.Text, 0.08);
-            Theme.Fill(g, ClientRectangle, Theme.S(7), fill);
-            if (!Primary && Enabled) Theme.Stroke(g, ClientRectangle, Theme.S(7), Theme.Border, false);
-            if (Focused && ShowFocusCues) Theme.Stroke(g, ClientRectangle, Theme.S(7), Theme.Text, false);
+            if (Primary) Theme.FillGradient(g, ClientRectangle, Theme.S(9), Shade(Theme.Accent, back), Shade(Theme.Accent2, back));
+            else
+            {
+                Theme.Fill(g, ClientRectangle, Theme.S(9), Shade(Theme.Raised, back));
+                if (Enabled) Theme.Stroke(g, ClientRectangle, Theme.S(9), Theme.Border, false);
+            }
+            if (Focused && ShowFocusCues) Theme.Stroke(g, ClientRectangle, Theme.S(9), Theme.Text, false);
 
             Color text = !Enabled ? Theme.Mix(Theme.Muted, back, 0.45) : Primary ? Color.White : Theme.Text;
             TextRenderer.DrawText(g, Text, Font, ClientRectangle, text, Theme.Line | TextFormatFlags.HorizontalCenter);
@@ -259,17 +361,18 @@ namespace Squish
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
-            Color back = Theme.Behind(this);
-            g.Clear(back);
+            Theme.PaintBackdrop(g, this);
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            Theme.Fill(g, ClientRectangle, Theme.S(8), Theme.Raised);
+            Theme.Fill(g, ClientRectangle, Theme.S(9), Theme.Raised);
             for (int i = 0; i < items.Length; i++)
             {
                 var r = new Rectangle(edges[i], 0, edges[i + 1] - edges[i], Height);
                 Color text = i == hover && Enabled ? Theme.Text : Theme.Muted;
                 if (i == selected)
                 {
-                    Theme.Fill(g, Rectangle.Inflate(r, -Theme.S(3), -Theme.S(3)), Theme.S(6), Enabled ? Theme.Accent : Theme.Mix(Theme.Accent, Theme.Raised, 0.6));
+                    double dim = Enabled ? 0 : 0.6;
+                    Theme.FillGradient(g, Rectangle.Inflate(r, -Theme.S(3), -Theme.S(3)), Theme.S(7),
+                        Theme.Mix(Theme.Accent, Theme.Raised, dim), Theme.Mix(Theme.Accent2, Theme.Raised, dim));
                     text = Enabled ? Color.White : Theme.Muted;
                 }
                 else if (!Enabled) text = Theme.Mix(Theme.Muted, Theme.Raised, 0.5);
@@ -299,15 +402,18 @@ namespace Squish
         {
             Graphics g = e.Graphics;
             Color back = Theme.Behind(this);
-            g.Clear(back);
+            Theme.PaintBackdrop(g, this);
             g.SmoothingMode = SmoothingMode.AntiAlias;
 
             int h = Theme.S(18), w = Theme.S(34), knob = h - Theme.S(6);
             var track = new Rectangle(0, (Height - h) / 2, w, h);
-            Color fill = Checked ? Theme.Accent : Theme.Raised;
-            if (!Enabled) fill = Theme.Mix(fill, back, 0.6);
-            Theme.Fill(g, track, h, fill);
-            if (!Checked) Theme.Stroke(g, track, h, Theme.Border, false);
+            double dim = Enabled ? 0 : 0.6;
+            if (Checked) Theme.FillGradient(g, track, h, Theme.Mix(Theme.Accent, back, dim), Theme.Mix(Theme.Accent2, back, dim));
+            else
+            {
+                Theme.Fill(g, track, h, Theme.Mix(Theme.Raised, back, dim));
+                Theme.Stroke(g, track, h, Theme.Border, false);
+            }
             int x = Checked ? track.Right - knob - Theme.S(3) : track.X + Theme.S(3);
             using (var b = new SolidBrush(Checked && Enabled ? Color.White : Theme.Muted))
                 g.FillEllipse(b, x, track.Y + (h - knob) / 2f - 0.5f, knob, knob);
@@ -343,10 +449,12 @@ namespace Squish
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
-            g.Clear(Theme.Behind(this));
+            Theme.PaintBackdrop(g, this);
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            Theme.Fill(g, ClientRectangle, Height, Theme.Raised);
-            if (value > 0) Theme.Fill(g, new Rectangle(0, 0, Math.Max(Height, Width * value / 100), Height), Height, color);
+            Theme.Fill(g, ClientRectangle, Height, Theme.Mix(Theme.Raised, Theme.Border, 0.35));
+            if (value == 0) return;
+            var bar = new Rectangle(0, 0, Math.Max(Height, Width * value / 100), Height);
+            Theme.FillGradient(g, bar, Height, color, color == Theme.Accent ? Theme.Accent2 : color);
         }
     }
 
@@ -361,9 +469,10 @@ namespace Squish
 
         protected override void OnPaintBackground(PaintEventArgs e)
         {
-            e.Graphics.Clear(Theme.Bg);
+            Theme.PaintBackdrop(e.Graphics, this);
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            Theme.Fill(e.Graphics, ClientRectangle, Theme.S(12), Theme.Card);
+            Theme.Fill(e.Graphics, ClientRectangle, Theme.S(14), Theme.Card);
+            Theme.Stroke(e.Graphics, ClientRectangle, Theme.S(14), Theme.Mix(Theme.Card, Theme.Border, 0.55), false);
         }
     }
 
@@ -425,6 +534,8 @@ namespace Squish
         }
 
         public void ApplyScrollTheme() { Native.SetWindowTheme(Handle, Theme.Dark ? "DarkMode_Explorer" : "Explorer", null); }
+
+        protected override void OnPaintBackground(PaintEventArgs e) { Theme.PaintBackdrop(e.Graphics, this); }
 
         public void Relayout()
         {
@@ -546,7 +657,8 @@ namespace Squish
 
         void PaintRow(Graphics g, Rectangle r, Job j, bool hovered)
         {
-            Theme.Fill(g, r, Theme.S(12), hovered ? Theme.Mix(Theme.Card, Theme.Raised, 0.5) : Theme.Card);
+            Theme.Fill(g, r, Theme.S(14), hovered ? Theme.Mix(Theme.Card, Theme.Raised, 0.5) : Theme.Card);
+            Theme.Stroke(g, r, Theme.S(14), Theme.Mix(Theme.Card, Theme.Border, 0.55), false);
 
             Color accent = j.State == JobState.Done ? Theme.Good : j.State == JobState.Failed ? Theme.Bad : Theme.Accent;
             TextRenderer.DrawText(g, j.IsDir ? "\uE8B7" : "\uE7C3", Theme.Icon, new Rectangle(r.X + Theme.S(12), r.Y, Theme.S(36), r.Height), accent, Theme.Line | TextFormatFlags.HorizontalCenter);
@@ -765,6 +877,7 @@ namespace Squish
             BackColor = Theme.Bg;
             ForeColor = Theme.Text;
             AutoScaleMode = AutoScaleMode.None;
+            DoubleBuffered = true;
             // Fit small laptop screens and high scaling settings.
             Rectangle work = Screen.PrimaryScreen.WorkingArea;
             ClientSize = new Size(Math.Min(S(900), work.Width - S(24)), Math.Min(S(680), work.Height - S(48)));
@@ -773,6 +886,7 @@ namespace Squish
 
             BuildUi();
             HookDrop(this);
+            ClearLabelBackgrounds(this);
             ApplySettings(cfg);
 
             string saved;
@@ -791,10 +905,22 @@ namespace Squish
             ApplyTitleBar();
         }
 
-        // Title bar in the same mode, tinted to match the window where Windows allows it.
+        protected override void OnPaintBackground(PaintEventArgs e) { Theme.PaintBackdrop(e.Graphics, this); }
+
+        // The gradient spans the window, so everything repaints when the window changes size.
+        protected override void OnResize(EventArgs e) { base.OnResize(e); Invalidate(true); }
+
+        // Labels are see-through so the gradient (or card) shows behind their text.
+        static void ClearLabelBackgrounds(Control c)
+        {
+            if (c is Label) c.BackColor = Color.Transparent;
+            foreach (Control child in c.Controls) ClearLabelBackgrounds(child);
+        }
+
+        // Title bar in the same mode, tinted to match the top of the window where Windows allows it.
         void ApplyTitleBar()
         {
-            int dark = Theme.Dark ? 1 : 0, caption = Theme.Bg.R | Theme.Bg.G << 8 | Theme.Bg.B << 16;
+            int dark = Theme.Dark ? 1 : 0, caption = Theme.BgTop.R | Theme.BgTop.G << 8 | Theme.BgTop.B << 16;
             Native.DwmSetWindowAttribute(Handle, 20, ref dark, 4);
             Native.DwmSetWindowAttribute(Handle, 35, ref caption, 4);
         }
@@ -1033,12 +1159,12 @@ namespace Squish
 
         static TableLayoutPanel NewTable(int columns, int rows)
         {
-            return new TableLayoutPanel { ColumnCount = columns, RowCount = rows, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = new Padding(0) };
+            return new Table { ColumnCount = columns, RowCount = rows, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = new Padding(0) };
         }
 
         static FlowLayoutPanel NewFlow()
         {
-            return new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = new Padding(0) };
+            return new Flow { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = new Padding(0) };
         }
 
         static FlatButton NewButton(string text, EventHandler click)
@@ -1510,7 +1636,7 @@ namespace Squish
                 proven = true;
                 state = JobState.Done;
                 string files;
-                note = "Verified lossless  \u00B7  SHA-256 matches the originals" + (packed.TryGetValue("Files", out files) ? " (" + long.Parse(files).ToString("N0") + " files)" : "");
+                note = "Verified lossless  \u00B7  SHA-256 matches the originals" + (packed.TryGetValue("Files", out files) ? " (" + long.Parse(files).ToString("N0") + (files == "1" ? " file)" : " files)") : "");
                 detail = "VERIFIED LOSSLESS\r\n\r\n" +
                          "The archive was fully decompressed and every file hashed with SHA-256. The original files " +
                          "were then hashed the same way. Contents, file names, file and folder counts and total size are identical.\r\n\r\n" +
@@ -1804,6 +1930,7 @@ namespace Squish
         [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr process);
         [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
         [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] public static extern int SetWindowTheme(IntPtr hwnd, string app, string idList);
+        [DllImport("gdi32.dll")] public static extern IntPtr AddFontMemResourceEx(IntPtr font, uint size, IntPtr reserved, ref uint count);
     }
 
     // The modern Explorer-style folder picker (the built-in WinForms one is the old tree dialog).

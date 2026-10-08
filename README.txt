@@ -40,13 +40,18 @@ Size prediction
   already compressed and barely shrink.
 
 Light and dark mode
-  The sun/moon button at the top right switches modes. The choice is saved.
+  The sun/moon button at the top right switches between the purple dark
+  theme and the warm light theme. The choice is saved.
 
-Portable
-  This folder runs on any Windows 10 or 11 PC. It carries its own copy of
-  7-Zip's engine in the 7-Zip subfolder, so 7-Zip does not need to be
-  installed. Settings are kept in Squish.ini next to the app.
+Portable and offline
+  This folder runs on any Windows 10 or 11 PC and never uses the internet.
+  It carries its own copy of 7-Zip's engine in the 7-Zip subfolder, so 7-Zip
+  does not need to be installed, and its typeface is built into Squish.exe.
+  Settings are kept in Squish.ini next to the app.
 
 To extract an archive later, use 7-Zip (or Windows 11's built-in .7z support).
 
-7-Zip is by Igor Pavlov and is free software; see 7-Zip\License.txt.
+Credits
+  7-Zip is by Igor Pavlov and is free software; see 7-Zip\License.txt.
+  The typeface is Jost by indestructible type*, used under the SIL Open Font
+  License; see "Font license (Jost).txt".

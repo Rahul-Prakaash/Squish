@@ -11,7 +11,7 @@ if not exist "%CSC%" (
     pause
     exit /b 1
 )
-"%CSC%" /nologo /target:winexe /optimize+ /win32icon:"%HERE%app.ico" /r:Microsoft.VisualBasic.dll /out:"%HERE%Squish.exe" "%HERE%Squish.cs"
+"%CSC%" /nologo /target:winexe /optimize+ /win32icon:"%HERE%app.ico" /r:Microsoft.VisualBasic.dll /resource:"%HERE%fonts\Jost-400-Book.ttf" /resource:"%HERE%fonts\Jost-500-Medium.ttf" /resource:"%HERE%fonts\Jost-600-Semi.ttf" /out:"%HERE%Squish.exe" "%HERE%Squish.cs"
 if errorlevel 1 (
     pause
     exit /b 1
@@ -35,5 +35,6 @@ copy /y "%HERE%README.txt" "%OUT%\" >nul
 copy /y "%SZ%7z.exe" "%OUT%\7-Zip\" >nul
 copy /y "%SZ%7z.dll" "%OUT%\7-Zip\" >nul
 copy /y "%SZ%License.txt" "%OUT%\7-Zip\" >nul
+copy /y "%HERE%fonts\OFL.txt" "%OUT%\Font license (Jost).txt" >nul
 "%SZ%7z.exe" a -tzip -mx=9 -bso0 -bsp0 "%HERE%Portable\Squish-Portable.zip" "%OUT%" >nul
 echo Made Portable\Squish\ and Portable\Squish-Portable.zip
